@@ -808,7 +808,7 @@ final class QuickAskViewModel: ObservableObject {
             break
         case "error":
             let message = payload["message"] as? String ?? "Something went wrong."
-            statusText = message
+            statusText = friendlyErrorMessage(from: message)
         default:
             break
         }
@@ -845,7 +845,7 @@ final class QuickAskViewModel: ObservableObject {
         if exitCode != 0 && statusText.isEmpty && !interruptedForSteer {
             let stderr = String(data: stderrBuffer, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            statusText = stderr?.isEmpty == false ? stderr! : "The reply failed."
+            statusText = friendlyErrorMessage(from: stderr)
         }
 
         if let assistantID = activeAssistantMessageID,
@@ -862,6 +862,34 @@ final class QuickAskViewModel: ObservableObject {
             return
         }
         requestFocus()
+    }
+
+    private func friendlyErrorMessage(from rawMessage: String?) -> String {
+        let fallback = "The reply failed."
+        guard let rawMessage else { return fallback }
+        let trimmed = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return fallback }
+
+        let lowercased = trimmed.lowercased()
+        let modelLabel = models.first(where: { $0.id == selectedModelID })?.shortLabel ?? "This model"
+
+        if lowercased.contains("env: node: no such file or directory") {
+            return "\(modelLabel) could not start because the Gemini CLI could not find Node.js. Reopen Quick Ask or choose another model."
+        }
+        if lowercased.contains("not logged in") || lowercased.contains("auth login") {
+            return "\(modelLabel) is not available from this Mac right now. Open Settings and finish the CLI login for that provider."
+        }
+        if lowercased.contains("quota") || lowercased.contains("capacity") || lowercased.contains("rate limit") {
+            return "\(modelLabel) is temporarily out of quota or rate-limited. Try again shortly or switch models."
+        }
+        if lowercased.contains("requested entity was not found") || lowercased.contains("modelnotfounderror") {
+            return "\(modelLabel) is not available in the installed CLI right now. Refresh providers or choose another model."
+        }
+        if lowercased.contains("could not start backend") {
+            return "Quick Ask could not start the backend process for \(modelLabel)."
+        }
+
+        return trimmed
     }
 
     private func trimEmptyAssistantMessage() {
@@ -1175,6 +1203,7 @@ struct QuickAskSettingsView: View {
     let onClearArchiveDirectory: () -> Void
     let onRefreshProviders: () -> Void
     let onLaunchProviderSetup: (String) -> Void
+    let onLayoutChange: () -> Void
     let onContinue: () -> Void
     let onClose: () -> Void
 
@@ -1339,8 +1368,13 @@ struct QuickAskSettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(QuickAskTheme.historyBackground)
         }
-        .frame(minWidth: 560, minHeight: 320, maxHeight: 460)
+        .frame(minWidth: 560, minHeight: 320)
         .background(QuickAskTheme.frameBackground)
+        .onAppear(perform: onLayoutChange)
+        .onChange(of: settings.historyEnabled) { _, _ in onLayoutChange() }
+        .onChange(of: settings.customArchiveDirectoryPath) { _, _ in onLayoutChange() }
+        .onChange(of: settings.providerStatuses) { _, _ in onLayoutChange() }
+        .onChange(of: settings.providerStatusMessage) { _, _ in onLayoutChange() }
     }
 }
 
@@ -1483,10 +1517,8 @@ struct MessageBubble: View {
     var body: some View {
         HStack {
             if message.role == .user { Spacer(minLength: 40) }
-            Text(message.content.isEmpty ? "…" : message.content)
-                .font(.system(size: 13, weight: .regular, design: .default))
+            MessageContentView(text: message.content.isEmpty ? "…" : message.content)
                 .foregroundStyle(textColor)
-                .textSelection(.enabled)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .padding(.trailing, canCopy ? 24 : 10)
@@ -1521,6 +1553,188 @@ struct MessageBubble: View {
         }
         .frame(maxWidth: .infinity)
     }
+}
+
+private enum MessageMarkdownBlock {
+    case text(String)
+    case table(header: [String], rows: [[String]])
+}
+
+private struct MessageContentView: View {
+    let text: String
+
+    private var blocks: [MessageMarkdownBlock] {
+        parseMarkdownBlocks(text)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .text(let value):
+                    Text(markdownAttributedString(from: value))
+                        .font(.system(size: 13, weight: .regular, design: .default))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .table(let header, let rows):
+                    MessageMarkdownTableView(header: header, rows: rows)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct MessageMarkdownTableView: View {
+    let header: [String]
+    let rows: [[String]]
+
+    private var columnCount: Int {
+        max(header.count, rows.map(\.count).max() ?? 0)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 0) {
+                GridRow {
+                    ForEach(0..<columnCount, id: \.self) { index in
+                        Text(markdownAttributedString(from: cellText(header, index: index)))
+                            .font(.system(size: 12, weight: .semibold, design: .default))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                    }
+                }
+
+                Rectangle()
+                    .fill(QuickAskTheme.dividerColor)
+                    .frame(height: 1)
+                    .gridCellColumns(columnCount)
+
+                ForEach(Array(rows.enumerated()), id: \.offset) { offset, row in
+                    GridRow {
+                        ForEach(0..<columnCount, id: \.self) { index in
+                            Text(markdownAttributedString(from: cellText(row, index: index)))
+                                .font(.system(size: 12, weight: .regular, design: .default))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                        }
+                    }
+                    if offset != rows.count - 1 {
+                        Rectangle()
+                            .fill(QuickAskTheme.dividerColor.opacity(0.7))
+                            .frame(height: 1)
+                            .gridCellColumns(columnCount)
+                    }
+                }
+            }
+        }
+        .background(Color.white.opacity(0.08))
+        .overlay(Rectangle().stroke(Color.black.opacity(0.14), lineWidth: 1))
+    }
+
+    private func cellText(_ row: [String], index: Int) -> String {
+        guard index < row.count else { return "" }
+        return row[index]
+    }
+}
+
+private func markdownAttributedString(from text: String) -> AttributedString {
+    let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    if let attributed = try? AttributedString(markdown: text, options: options) {
+        return attributed
+    }
+    return AttributedString(text)
+}
+
+private func parseMarkdownBlocks(_ text: String) -> [MessageMarkdownBlock] {
+    let lines = text.components(separatedBy: "\n")
+    var blocks: [MessageMarkdownBlock] = []
+    var textBuffer: [String] = []
+    var index = 0
+
+    func flushTextBuffer() {
+        let joined = textBuffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !joined.isEmpty {
+            blocks.append(.text(joined))
+        }
+        textBuffer.removeAll(keepingCapacity: true)
+    }
+
+    while index < lines.count {
+        if let table = parseMarkdownTable(lines: lines, startIndex: index) {
+            flushTextBuffer()
+            blocks.append(.table(header: table.header, rows: table.rows))
+            index = table.nextIndex
+            continue
+        }
+
+        textBuffer.append(lines[index])
+        index += 1
+    }
+
+    flushTextBuffer()
+    return blocks.isEmpty ? [.text(text)] : blocks
+}
+
+private func parseMarkdownTable(lines: [String], startIndex: Int) -> (header: [String], rows: [[String]], nextIndex: Int)? {
+    guard startIndex + 1 < lines.count else { return nil }
+    let headerLine = lines[startIndex]
+    let separatorLine = lines[startIndex + 1]
+    guard markdownRowLooksLikeTable(headerLine), markdownSeparatorLooksLikeTable(separatorLine) else {
+        return nil
+    }
+
+    let header = parseMarkdownTableRow(headerLine)
+    guard !header.isEmpty else { return nil }
+
+    var rows: [[String]] = []
+    var index = startIndex + 2
+    while index < lines.count {
+        let line = lines[index]
+        if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            break
+        }
+        guard markdownRowLooksLikeTable(line) else { break }
+        rows.append(parseMarkdownTableRow(line))
+        index += 1
+    }
+
+    return (header: header, rows: rows, nextIndex: index)
+}
+
+private func markdownRowLooksLikeTable(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    return trimmed.contains("|") && parseMarkdownTableRow(trimmed).count >= 2
+}
+
+private func markdownSeparatorLooksLikeTable(_ line: String) -> Bool {
+    let cells = parseMarkdownTableRow(line)
+    guard !cells.isEmpty else { return false }
+    return cells.allSatisfy { cell in
+        let trimmed = cell.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        return trimmed.allSatisfy { character in
+            character == "-" || character == ":" || character == " "
+        } && trimmed.contains("-")
+    }
+}
+
+private func parseMarkdownTableRow(_ line: String) -> [String] {
+    var trimmed = line.trimmingCharacters(in: .whitespaces)
+    if trimmed.hasPrefix("|") {
+        trimmed.removeFirst()
+    }
+    if trimmed.hasSuffix("|") {
+        trimmed.removeLast()
+    }
+    return trimmed
+        .split(separator: "|", omittingEmptySubsequences: false)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
 }
 
 struct QueuedPromptRow: View {
@@ -2018,6 +2232,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 onLaunchProviderSetup: { [weak self] providerID in
                     self?.launchProviderSetup(for: providerID)
                 },
+                onLayoutChange: { [weak self] in
+                    self?.resizeSettingsWindowToFitContent(centerOnScreen: false)
+                },
                 onContinue: { [weak self] in
                     self?.completeInitialSetup()
                 },
@@ -2195,7 +2412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 
     private func showSettingsWindow(activate: Bool = true) {
         refreshSettingsStatus()
-        positionSettingsWindow()
+        resizeSettingsWindowToFitContent(centerOnScreen: true)
         settingsWindow.makeKeyAndOrderFront(nil)
         settingsWindow.orderFrontRegardless()
         if activate {
@@ -2435,6 +2652,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             y: round(visible.midY - (size.height / 2))
         )
         settingsWindow.setFrameOrigin(origin)
+    }
+
+    private func resizeSettingsWindowToFitContent(centerOnScreen: Bool) {
+        guard let settingsWindow, let settingsHostingView else { return }
+        settingsHostingView.layoutSubtreeIfNeeded()
+
+        let targetWidth: CGFloat = 560
+        let minHeight: CGFloat = 320
+        let visible = currentScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1280, height: 800)
+        let maxHeight = max(minHeight, floor(visible.height))
+        let fittingHeight = ceil(settingsHostingView.fittingSize.height)
+        let targetHeight = max(minHeight, min(fittingHeight, maxHeight))
+
+        let currentFrame = settingsWindow.frame
+        let midX = centerOnScreen ? visible.midX : currentFrame.midX
+        let midY = centerOnScreen ? visible.midY : currentFrame.midY
+
+        var frame = NSRect(
+            x: round(midX - (targetWidth / 2)),
+            y: round(midY - (targetHeight / 2)),
+            width: targetWidth,
+            height: targetHeight
+        )
+
+        if frame.width > visible.width {
+            frame.size.width = visible.width
+            frame.origin.x = visible.minX
+        } else {
+            frame.origin.x = min(max(frame.origin.x, visible.minX), visible.maxX - frame.width)
+        }
+
+        if frame.height > visible.height {
+            frame.size.height = visible.height
+            frame.origin.y = visible.minY
+        } else {
+            frame.origin.y = min(max(frame.origin.y, visible.minY), visible.maxY - frame.height)
+        }
+
+        if !settingsWindow.isVisible {
+            settingsWindow.setFrame(frame, display: false)
+        } else if abs(settingsWindow.frame.width - frame.width) > 0.5 ||
+                    abs(settingsWindow.frame.height - frame.height) > 0.5 ||
+                    abs(settingsWindow.frame.origin.x - frame.origin.x) > 0.5 ||
+                    abs(settingsWindow.frame.origin.y - frame.origin.y) > 0.5 {
+            settingsWindow.setFrame(frame, display: true, animate: false)
+        }
     }
 
     private func loadSession(_ sessionID: String) {

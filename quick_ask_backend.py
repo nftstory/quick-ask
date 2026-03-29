@@ -775,7 +775,13 @@ def stream_gemini(model: str, history: list[dict[str, str]]) -> int:
 
             if payload.get("type") == "result":
                 if payload.get("status") != "success":
-                    emit({"type": "error", "message": "Gemini request failed."})
+                    error_payload = payload.get("error")
+                    error_message = None
+                    if isinstance(error_payload, dict):
+                        error_message = error_payload.get("message")
+                    if not isinstance(error_message, str) or not error_message.strip():
+                        error_message = "Gemini request failed."
+                    emit({"type": "error", "message": error_message})
                     return 1
                 emit({"type": "done"})
                 return 0
