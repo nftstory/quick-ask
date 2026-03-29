@@ -2183,7 +2183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 panel.setFrameOrigin(targetOrigin)
             }
         }
-        DispatchQueue.main.async { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.isProgrammaticPanelMove = false
         }
         uiTestHarness?.writeState()

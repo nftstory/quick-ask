@@ -221,11 +221,19 @@ class QuickAskUITests(unittest.TestCase):
             app.command("complete_generation", text="reply")
             app.command("set_input", text="keep this draft")
 
-            first_reset = app.command("shortcut", shortcut="cmd_n")
+            app.command("shortcut", shortcut="cmd_n")
+            first_reset = app.wait_for(
+                lambda state: state["messageCount"] == 0 and state["inputText"] == "keep this draft",
+                timeout=5.0,
+            )
             self.assertEqual(first_reset["messageCount"], 0)
             self.assertEqual(first_reset["inputText"], "keep this draft")
 
-            second_reset = app.command("shortcut", shortcut="cmd_n")
+            app.command("shortcut", shortcut="cmd_n")
+            second_reset = app.wait_for(
+                lambda state: state["messageCount"] == 0 and state["inputText"] == "",
+                timeout=5.0,
+            )
             self.assertEqual(second_reset["messageCount"], 0)
             self.assertEqual(second_reset["inputText"], "")
 
@@ -322,7 +330,12 @@ class QuickAskUITests(unittest.TestCase):
             self.assertTrue(gated["historyEnabled"])
 
             app.command("set_history_enabled", text="0")
-            after_continue = app.command("complete_setup")
+            app.wait_for(lambda state: state["historyEnabled"] is False, timeout=5.0)
+            app.command("complete_setup")
+            after_continue = app.wait_for(
+                lambda state: not state["settingsWindowVisible"] and not state["setupRequired"],
+                timeout=5.0,
+            )
             self.assertFalse(after_continue["settingsWindowVisible"])
             self.assertFalse(after_continue["setupRequired"])
             self.assertFalse(after_continue["historyEnabled"])
