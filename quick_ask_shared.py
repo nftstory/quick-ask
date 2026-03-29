@@ -245,7 +245,7 @@ def default_save_dir() -> pathlib.Path:
     else:
         dropbox = find_dropbox_base()
         if dropbox is not None:
-            save_dir = dropbox / "local-llm-chat" / "sessions"
+            save_dir = dropbox / "Quick Ask" / "sessions"
         else:
             save_dir = pathlib.Path.home() / "Library/Application Support/Quick Ask/sessions"
     save_dir.mkdir(parents=True, exist_ok=True)

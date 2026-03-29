@@ -219,6 +219,8 @@ final class QuickAskAppSettings: ObservableObject {
     private let archiveDirectoryKey = "QuickAskCustomArchiveDirectory"
     private let historyEnabledKey = "QuickAskHistoryEnabled"
     private let setupCompletedKey = "QuickAskSetupCompleted"
+    private let archiveAppFolderName = "Quick Ask"
+    private let archiveSessionsFolderName = "sessions"
 
     init(defaults: UserDefaults = quickAskUserDefaults()) {
         self.defaults = defaults
@@ -234,15 +236,31 @@ final class QuickAskAppSettings: ObservableObject {
     var customArchiveDirectory: URL? {
         let trimmed = customArchiveDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        return URL(fileURLWithPath: NSString(string: trimmed).expandingTildeInPath).standardizedFileURL
+        return normalizedArchiveDirectory(from: URL(fileURLWithPath: NSString(string: trimmed).expandingTildeInPath))
+    }
+
+    var effectiveArchiveDirectory: URL? {
+        guard historyEnabled else { return nil }
+        return customArchiveDirectory ?? defaultArchiveDirectory
+    }
+
+    var defaultArchiveDirectory: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dropboxCandidates = [
+            home.appendingPathComponent("Library/CloudStorage/Dropbox", isDirectory: true),
+            home.appendingPathComponent("Dropbox", isDirectory: true),
+        ]
+        let baseDirectory = dropboxCandidates.first(where: { FileManager.default.fileExists(atPath: $0.path) })
+            ?? home.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return normalizedArchiveDirectory(from: baseDirectory)
     }
 
     var requiresArchiveFolderChoice: Bool {
-        historyEnabled
+        false
     }
 
     var canContinuePastSetup: Bool {
-        !historyEnabled || customArchiveDirectory != nil
+        !historyEnabled || effectiveArchiveDirectory != nil
     }
 
     var requiresInitialSetup: Bool {
@@ -253,23 +271,23 @@ final class QuickAskAppSettings: ObservableObject {
         if !historyEnabled {
             return "Disabled"
         }
-        return customArchiveDirectory == nil ? "Not chosen" : "Chosen"
+        return customArchiveDirectory == nil ? "Default" : "Custom"
     }
 
     var archiveDirectoryDetail: String {
         if !historyEnabled {
             return "History is off."
         }
-        return customArchiveDirectory?.path ?? "Choose an archive folder to continue."
+        return effectiveArchiveDirectory?.path ?? "History is enabled, but no archive location is available."
     }
 
     func processEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
-        if !historyEnabled || customArchiveDirectory == nil {
+        if !historyEnabled || effectiveArchiveDirectory == nil {
             environment["QUICK_ASK_DISABLE_HISTORY"] = "1"
             environment.removeValue(forKey: "QUICK_ASK_SAVE_DIR")
-        } else if let customArchiveDirectory {
-            environment["QUICK_ASK_SAVE_DIR"] = customArchiveDirectory.path
+        } else if let effectiveArchiveDirectory {
+            environment["QUICK_ASK_SAVE_DIR"] = effectiveArchiveDirectory.path
             environment.removeValue(forKey: "QUICK_ASK_DISABLE_HISTORY")
         } else {
             environment.removeValue(forKey: "QUICK_ASK_SAVE_DIR")
@@ -283,7 +301,7 @@ final class QuickAskAppSettings: ObservableObject {
     }
 
     func setCustomArchiveDirectory(_ url: URL) {
-        let standardized = url.standardizedFileURL
+        let standardized = normalizedArchiveDirectory(from: url)
         try? FileManager.default.createDirectory(at: standardized, withIntermediateDirectories: true)
         customArchiveDirectoryPath = standardized.path
         defaults.set(standardized.path, forKey: archiveDirectoryKey)
@@ -292,6 +310,24 @@ final class QuickAskAppSettings: ObservableObject {
     func clearCustomArchiveDirectory() {
         customArchiveDirectoryPath = ""
         defaults.removeObject(forKey: archiveDirectoryKey)
+    }
+
+    func archiveFolderSelectionHint() -> String {
+        let defaultParent = defaultArchiveDirectory.deletingLastPathComponent().deletingLastPathComponent()
+        return "Quick Ask will save into a \(archiveAppFolderName) subfolder inside the folder you choose. Default: \(defaultParent.path)"
+    }
+
+    private func normalizedArchiveDirectory(from url: URL) -> URL {
+        let standardized = url.standardizedFileURL
+        if standardized.lastPathComponent == archiveSessionsFolderName {
+            return standardized
+        }
+        if standardized.lastPathComponent == archiveAppFolderName {
+            return standardized.appendingPathComponent(archiveSessionsFolderName, isDirectory: true)
+        }
+        return standardized
+            .appendingPathComponent(archiveAppFolderName, isDirectory: true)
+            .appendingPathComponent(archiveSessionsFolderName, isDirectory: true)
     }
 
     func markSetupCompleted() {
@@ -1209,10 +1245,20 @@ struct QuickAskSettingsView: View {
 
     private func commandButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
-            .buttonStyle(.plain)
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(QuickAskTheme.strongText)
-            .padding(.vertical, 2)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                Rectangle()
+                    .fill(Color.white.opacity(0.16))
+            )
+            .overlay(
+                Rectangle()
+                    .stroke(QuickAskTheme.dividerColor, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+            .buttonStyle(.plain)
     }
 
     var body: some View {
@@ -1222,9 +1268,10 @@ struct QuickAskSettingsView: View {
                     Text(settings.requiresInitialSetup ? "Quick Ask Setup" : "Quick Ask Settings")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(QuickAskTheme.strongText)
-                    Text("Reuse CLI logins only. No API keys.")
+                    Text("Reuse CLI logins only. No API keys. Encrypted history is safe to keep in cloud folders you do not trust with plaintext.")
                         .font(.system(size: 11))
                         .foregroundStyle(QuickAskTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
                 if settings.requiresInitialSetup {
@@ -1265,7 +1312,11 @@ struct QuickAskSettingsView: View {
                     }
                     .toggleStyle(.checkbox)
 
-                    Text(settings.historyEnabled ? "Pick a folder for encrypted archives before using Quick Ask." : "History is off. Quick Ask will not save transcripts.")
+                    Text(
+                        settings.historyEnabled
+                        ? "Chats are encrypted before they are written to disk. Quick Ask stores the transcript key in your macOS Keychain and uses it before writing history. If that key is unavailable, Quick Ask should not write chat logs."
+                        : "History is off. Quick Ask will not save transcripts."
+                    )
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(QuickAskTheme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -1282,6 +1333,11 @@ struct QuickAskSettingsView: View {
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
+                        Text(settings.archiveDirectorySummary == "Default" ? "Using the default Quick Ask archive folder." : "Using a custom Quick Ask archive folder.")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(QuickAskTheme.mutedText)
+                            .fixedSize(horizontal: false, vertical: true)
+
                         HStack(spacing: 8) {
                             commandButton("Choose Folder…") {
                                 onChooseArchiveDirectory()
@@ -1293,12 +1349,10 @@ struct QuickAskSettingsView: View {
                             }
                         }
 
-                        if settings.customArchiveDirectory == nil {
-                            Text("History can stay disabled, or you can choose any local or Dropbox-synced folder here.")
-                                .font(.system(size: 11, weight: .regular))
-                                .foregroundStyle(QuickAskTheme.mutedText)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                        Text(settings.archiveFolderSelectionHint())
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(QuickAskTheme.mutedText)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -2434,7 +2488,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
         panel.title = "Choose Archive Folder"
-        panel.directoryURL = settings.customArchiveDirectory?.deletingLastPathComponent()
+        panel.directoryURL = settings.effectiveArchiveDirectory?
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
             ?? FileManager.default.homeDirectoryForCurrentUser
         if panel.runModal() == .OK, let url = panel.url {
             settings.setCustomArchiveDirectory(url)
@@ -2591,6 +2647,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     private func restoreSession(_ session: QuickAskHistorySession) {
         hideHistoryWindow()
         loadSession(session.sessionID)
+    }
+
+    func showSettingsFromAppMenu() {
+        showSettingsWindow()
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func startNewChat() {
@@ -2868,6 +2929,14 @@ struct QuickAskApp: App {
     var body: some Scene {
         Settings {
             EmptyView()
+        }
+        .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    appDelegate.showSettingsFromAppMenu()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+            }
         }
     }
 }

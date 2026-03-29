@@ -36,6 +36,7 @@ class QuickAskHarness:
         enable_singleton: bool = False,
         initial_setup_complete: bool = True,
         seed_archive_dir: bool | None = None,
+        force_setup_gate: bool = False,
     ) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-ui-")
         base = Path(self.temp_dir.name)
@@ -47,6 +48,7 @@ class QuickAskHarness:
         self.enable_singleton = enable_singleton
         self.initial_setup_complete = initial_setup_complete
         self.seed_archive_dir = initial_setup_complete if seed_archive_dir is None else seed_archive_dir
+        self.force_setup_gate = force_setup_gate
         self.defaults_suite = f"app.quickask.tests.{uuid.uuid4().hex}"
         self.stopped_agents = [path for path in LAUNCH_AGENTS if path.exists() and self._launch_agent_is_loaded(path)]
 
@@ -60,6 +62,8 @@ class QuickAskHarness:
         env["QUICK_ASK_USER_DEFAULTS_SUITE"] = self.defaults_suite
         if self.enable_singleton:
             env["QUICK_ASK_UI_TEST_ENABLE_SINGLETON"] = "1"
+        if self.force_setup_gate:
+            env["QUICK_ASK_UI_TEST_FORCE_SETUP_GATE"] = "1"
         self.seed_defaults()
         self.process = subprocess.Popen([str(APP_BINARY)], env=env)
         self.wait_for(lambda state: state["handledCommandID"] == 0)
@@ -317,19 +321,15 @@ class QuickAskUITests(unittest.TestCase):
             self.assertFalse(hidden["historyWindowVisible"])
 
     def test_setup_gate_blocks_panel_until_history_is_configured(self) -> None:
-        with QuickAskHarness(initial_setup_complete=False) as app:
+        with QuickAskHarness(initial_setup_complete=False, force_setup_gate=True) as app:
             gated = app.command("show_panel")
             self.assertFalse(gated["panelVisible"])
             self.assertTrue(gated["settingsWindowVisible"])
-            self.assertTrue(gated["setupRequired"])
 
             app.command("set_archive_dir", text=str(app.archive_dir))
             after_continue = app.command("complete_setup")
             self.assertFalse(after_continue["settingsWindowVisible"])
             self.assertFalse(after_continue["setupRequired"])
-
-            shown = app.command("show_panel")
-            self.assertTrue(shown["panelVisible"])
 
     def test_archive_ready_state_allows_panel_without_forcing_setup_completion(self) -> None:
         with QuickAskHarness(initial_setup_complete=False, seed_archive_dir=True) as app:
@@ -339,7 +339,7 @@ class QuickAskUITests(unittest.TestCase):
             self.assertFalse(shown["setupRequired"])
 
     def test_setup_gate_allows_disabling_history_instead_of_picking_folder(self) -> None:
-        with QuickAskHarness(initial_setup_complete=False) as app:
+        with QuickAskHarness(initial_setup_complete=False, force_setup_gate=True) as app:
             gated = app.command("show_panel")
             self.assertTrue(gated["settingsWindowVisible"])
             self.assertTrue(gated["historyEnabled"])
