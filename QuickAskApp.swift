@@ -1218,7 +1218,8 @@ struct QuickAskSettingsView: View {
                 .fill(QuickAskTheme.dividerColor)
                 .frame(height: 1)
 
-            VStack(alignment: .leading, spacing: 14) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("History")
                         .font(.system(size: 13, weight: .semibold))
@@ -1332,11 +1333,13 @@ struct QuickAskSettingsView: View {
                     }
                 }
             }
-            .padding(14)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(QuickAskTheme.historyBackground)
         }
-        .frame(minWidth: 560, minHeight: 320)
+        .frame(minWidth: 560, minHeight: 320, maxHeight: 460)
         .background(QuickAskTheme.frameBackground)
     }
 }

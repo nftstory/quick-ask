@@ -184,7 +184,50 @@ def list_available_models() -> list[dict[str, Any]]:
 
 
 def command_path(name: str) -> str | None:
-    return shutil.which(name)
+    direct = shutil.which(name)
+    if direct:
+        return direct
+
+    common_paths = {
+        "claude": [
+            pathlib.Path.home() / ".local/bin/claude",
+            pathlib.Path("/opt/homebrew/bin/claude"),
+            pathlib.Path("/usr/local/bin/claude"),
+        ],
+        "codex": [
+            pathlib.Path("/opt/homebrew/bin/codex"),
+            pathlib.Path.home() / ".local/bin/codex",
+            pathlib.Path("/usr/local/bin/codex"),
+        ],
+        "gemini": [
+            pathlib.Path.home() / ".nvm/versions/node/v24.14.0/bin/gemini",
+            pathlib.Path.home() / ".local/bin/gemini",
+            pathlib.Path("/opt/homebrew/bin/gemini"),
+            pathlib.Path("/usr/local/bin/gemini"),
+        ],
+        "ollama": [
+            pathlib.Path("/opt/homebrew/bin/ollama"),
+            pathlib.Path("/usr/local/bin/ollama"),
+        ],
+    }
+    for candidate in common_paths.get(name, []):
+        if candidate.exists():
+            return str(candidate)
+
+    try:
+        result = subprocess.run(
+            ["/bin/zsh", "-lc", f"command -v {shlex.quote(name)}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+        candidate = result.stdout.strip()
+        if candidate and pathlib.Path(candidate).exists():
+            return candidate
+    except Exception:
+        pass
+    return None
 
 
 def run_subprocess(
@@ -204,6 +247,15 @@ def run_subprocess(
 
 
 def last_json_line(text: str) -> dict[str, Any] | None:
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            return payload
+
     for raw_line in reversed(text.splitlines()):
         line = raw_line.strip()
         if not line or not line.startswith("{"):
