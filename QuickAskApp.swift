@@ -478,6 +478,7 @@ private struct QuickAskUITestState: Codable {
     let inputBarFrame: CodableRect
     let inputBarBottomInset: Double
     let historyAreaHeight: Double
+    let historySessionIDs: [String]
     let messageCount: Int
     let queuedCount: Int
     let queuedPromptContents: [String]
@@ -1166,6 +1167,7 @@ final class QuickAskHistoryViewModel: ObservableObject {
     @Published var sessions: [QuickAskHistorySession] = []
     @Published var isLoading = false
     @Published var statusText = ""
+    @Published private(set) var deletingSessionIDs: Set<String> = []
 
     private let backendPath: String
     private let processEnvironmentProvider: () -> [String: String]
@@ -1231,10 +1233,58 @@ final class QuickAskHistoryViewModel: ObservableObject {
             }
         }
     }
+
+    func deleteSession(_ sessionID: String) {
+        guard !deletingSessionIDs.contains(sessionID) else { return }
+        deletingSessionIDs.insert(sessionID)
+        statusText = ""
+
+        let backendPath = self.backendPath
+        let processEnvironment = self.processEnvironmentProvider()
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> String? in
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = ["python3", backendPath, "delete", "--session-id", sessionID]
+                process.environment = processEnvironment
+
+                let stdout = Pipe()
+                let stderr = Pipe()
+                process.standardOutput = stdout
+                process.standardError = stderr
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    if process.terminationStatus == 0 {
+                        return nil
+                    }
+                    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let message = String(data: stderrData, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    return message?.isEmpty == false ? message : "Could not delete history item."
+                } catch {
+                    return "Could not delete history item."
+                }
+            }.value
+
+            guard let self else { return }
+            self.deletingSessionIDs.remove(sessionID)
+            if let result {
+                self.statusText = result
+            } else {
+                self.sessions.removeAll { $0.sessionID == sessionID }
+                self.reload()
+            }
+        }
+    }
 }
 
 struct QuickAskHistoryRow: View {
     let session: QuickAskHistorySession
+    let isDeleting: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
 
     private var relativeSavedAtText: String {
         let raw = session.savedAt.isEmpty ? session.createdAt : session.savedAt
@@ -1259,36 +1309,49 @@ struct QuickAskHistoryRow: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(session.preview.isEmpty ? "Untitled session" : session.preview)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(QuickAskTheme.strongText)
-                        .lineLimit(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                Button(action: onSelect) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(session.preview.isEmpty ? "Untitled session" : session.preview)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(QuickAskTheme.strongText)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                    HStack(spacing: 8) {
-                        if !session.model.isEmpty {
-                            Text(session.model)
+                        HStack(spacing: 8) {
+                            if !session.model.isEmpty {
+                                Text(session.model)
+                                    .font(.system(size: 11, weight: .regular))
+                                    .foregroundStyle(QuickAskTheme.mutedText)
+                                    .lineLimit(1)
+                            }
+                            Text("\(session.messageCount)")
+                                .font(.system(size: 11, weight: .regular, design: .monospaced))
+                                .foregroundStyle(QuickAskTheme.mutedText)
+                                .lineLimit(1)
+                            Text(relativeSavedAtText)
                                 .font(.system(size: 11, weight: .regular))
                                 .foregroundStyle(QuickAskTheme.mutedText)
                                 .lineLimit(1)
                         }
-                        Text(relativeSavedAtText)
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundStyle(QuickAskTheme.mutedText)
-                            .lineLimit(1)
                     }
                 }
+                .buttonStyle(.plain)
 
-                VStack(alignment: .trailing, spacing: 8) {
-                    Text("\(session.messageCount)")
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(QuickAskTheme.strongText)
-
-                    Text("restore")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(QuickAskTheme.strongText.opacity(0.82))
+                Button(action: onDelete) {
+                    if isDeleting {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(QuickAskTheme.strongText)
+                            .frame(width: 18, height: 18)
+                    } else {
+                        Image(systemName: "trash")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(QuickAskTheme.strongText.opacity(0.82))
+                            .frame(width: 18, height: 18)
+                    }
                 }
+                .buttonStyle(.plain)
+                .disabled(isDeleting)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
@@ -1363,12 +1426,16 @@ struct QuickAskHistoryView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(viewModel.sessions) { session in
-                                Button {
-                                    onSelectSession(session)
-                                } label: {
-                                    QuickAskHistoryRow(session: session)
-                                }
-                                .buttonStyle(.plain)
+                                QuickAskHistoryRow(
+                                    session: session,
+                                    isDeleting: viewModel.deletingSessionIDs.contains(session.sessionID),
+                                    onSelect: {
+                                        onSelectSession(session)
+                                    },
+                                    onDelete: {
+                                        viewModel.deleteSession(session.sessionID)
+                                    }
+                                )
                             }
                         }
                     }
@@ -3133,6 +3200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 Double((panel?.frame.height ?? 0) - ((viewModel?.inputBarFrame.maxY ?? 0)))
             ),
             historyAreaHeight: Double(viewModel?.historyAreaHeight ?? 0),
+            historySessionIDs: historyViewModel?.sessions.map(\.sessionID) ?? [],
             messageCount: viewModel?.messages.count ?? 0,
             queuedCount: viewModel?.queuedPrompts.count ?? 0,
             queuedPromptContents: viewModel?.queuedPrompts.map(\.content) ?? [],
@@ -3197,6 +3265,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             }
         case "clear_archive_dir":
             clearArchiveDirectory()
+        case "delete_history_session":
+            if let text = command.text, !text.isEmpty {
+                historyViewModel.deleteSession(text)
+            }
         case "clear_queue":
             viewModel.clearQueuedPrompts()
         case "steer_queue_item":

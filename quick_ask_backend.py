@@ -140,6 +140,9 @@ def parse_args() -> argparse.Namespace:
     load_parser = subparsers.add_parser("load", help="Load an encrypted Quick Ask session.")
     load_parser.add_argument("--session-id", required=True, help="Session identifier to load.")
 
+    delete_parser = subparsers.add_parser("delete", help="Delete an encrypted Quick Ask session.")
+    delete_parser.add_argument("--session-id", required=True, help="Session identifier to delete.")
+
     chat_parser = subparsers.add_parser("chat", help="Stream a chat reply.")
     chat_parser.add_argument("--model-id", required=True, help="Combined provider/model identifier.")
 
@@ -978,6 +981,16 @@ def handle_load(session_id: str) -> int:
     return 0
 
 
+def handle_delete(session_id: str) -> int:
+    if history_disabled():
+        emit({"type": "error", "message": "History is disabled."})
+        return 1
+    base_dir = shared.default_save_dir()
+    path = shared.delete_session(base_dir, session_id)
+    emit({"type": "deleted", "session_id": session_id, "path": str(path)})
+    return 0
+
+
 def handle_chat(model_id: str) -> int:
     history = read_history_from_stdin()
     if "::" not in model_id:
@@ -1124,6 +1137,8 @@ def main() -> int:
         return handle_history(args.limit)
     if args.command == "load":
         return handle_load(args.session_id)
+    if args.command == "delete":
+        return handle_delete(args.session_id)
     if args.command == "chat":
         return handle_chat(args.model_id)
     if args.command == "save":

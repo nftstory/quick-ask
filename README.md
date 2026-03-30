@@ -1,6 +1,6 @@
-# quick-llm
+# quick-ask
 
-`quick-llm` is the repo for `Quick Ask`, a compact macOS chat panel for short prompts.
+`quick-ask` is the repo for `Quick Ask`, a compact macOS chat panel for short prompts.
 
 The app lives above your other windows, keeps the input bar pinned while the conversation grows upward, reuses existing CLI logins instead of API keys, and can save transcripts with encrypted-at-rest storage.
 
@@ -16,6 +16,7 @@ The app lives above your other windows, keeps the input bar pinned while the con
 - Cancel queued prompts without interrupting the current reply
 - Steer or remove each queued prompt individually
 - Restore earlier chats from encrypted saved history
+- Delete saved threads directly from the history window
 - Show a small setup screen only when history is enabled but no archive folder has been chosen yet
 - Pick your own archive folder or disable history entirely
 - Switch between Claude via Claude CLI, ChatGPT via Codex CLI, Gemini via Gemini CLI, and installed Ollama models
@@ -80,9 +81,10 @@ Model switching semantics:
 
 ## Repo Notes
 
-- Repo name: `quick-llm`
-- GitHub: `nftstory/quick-llm`
+- Repo name: `quick-ask`
+- GitHub: `nftstory/quick-ask`
 - App name: `Quick Ask`
+- License: Apache-2.0 with Commons Clause (source-available; resale requires permission)
 
 ## Development
 

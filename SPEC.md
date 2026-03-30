@@ -1,4 +1,4 @@
-# Quick Ask / quick-llm Specification
+# Quick Ask / quick-ask Specification
 
 This document is the working product spec and execution checklist for `Quick Ask`.
 
@@ -19,7 +19,7 @@ It should feel like a native instant-access utility:
 - optionally save encrypted transcript history
 - reuse existing CLI-authenticated LLM access instead of API keys
 
-The repository name is `quick-llm`.
+The repository name is `quick-ask`.
 The app name is `Quick Ask`.
 
 ## Primary User Goals
@@ -116,6 +116,7 @@ The app name is `Quick Ask`.
 - Open with `Cmd+Shift+\\`
 - Dismiss automatically when the main panel hides
 - Restore prior chats from encrypted history
+- Delete prior chats from encrypted history
 
 ### Settings window
 

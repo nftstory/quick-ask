@@ -501,3 +501,24 @@ class SessionStore:
         encrypted = encrypt_payload(payload)
         self.path.write_text(json.dumps(encrypted, indent=2) + "\n", encoding="utf-8")
         self.latest_path.write_text(str(self.path) + "\n", encoding="utf-8")
+
+
+def refresh_latest_pointer(save_dir: pathlib.Path) -> None:
+    latest_path = save_dir / "LATEST"
+    candidates = sorted(
+        save_dir.glob("*.enc.json"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    if candidates:
+        latest_path.write_text(str(candidates[0]) + "\n", encoding="utf-8")
+    elif latest_path.exists():
+        latest_path.unlink()
+
+
+def delete_session(save_dir: pathlib.Path, session: str) -> pathlib.Path:
+    path = resolve_session_path(save_dir, session)
+    if path.exists():
+        path.unlink()
+    refresh_latest_pointer(save_dir)
+    return path

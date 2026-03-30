@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -15,6 +16,11 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import quick_ask_shared as shared
+
 APP_BINARY = Path(os.environ.get("QUICK_ASK_APP_BINARY", Path.home() / "Applications/Quick Ask.app/Contents/MacOS/Quick Ask"))
 LAUNCH_AGENTS = [
     Path.home() / "Library/LaunchAgents/app.quickask.mac.plist",
@@ -118,6 +124,30 @@ class QuickAskHarness:
 
     def clear_defaults(self) -> None:
         run_command(["defaults", "delete", self.defaults_suite])
+
+    @property
+    def effective_archive_dir(self) -> Path:
+        return self.archive_dir / "Quick Ask" / "sessions"
+
+    def seed_history_session(self, session_id: str, preview: str, *, model_id: str = "claude::claude-opus-4-6") -> Path:
+        store = shared.SessionStore(self.effective_archive_dir, session_id=session_id)
+        payload = {
+            "session_id": session_id,
+            "created_at": "2026-03-29T12:00:00Z",
+            "saved_at": "2026-03-29T12:00:00Z",
+            "model": "Claude Opus 4.6",
+            "model_id": model_id,
+            "num_ctx": 0,
+            "endpoint": {"label": "claude-cli-login", "base_url": "claude://login"},
+            "source": "quick-ask",
+            "messages": [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": preview},
+                {"role": "assistant", "content": "reply"},
+            ],
+        }
+        store.save(payload)
+        return store.path
 
     def read_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -345,6 +375,25 @@ class QuickAskUITests(unittest.TestCase):
             self.assertTrue(shown["historyWindowVisible"])
             hidden = app.command("shortcut", shortcut="cmd_shift_backslash")
             self.assertFalse(hidden["historyWindowVisible"])
+
+    def test_history_delete_removes_saved_session_file(self) -> None:
+        with QuickAskHarness() as app:
+            first = app.seed_history_session("session-a", "first prompt")
+            second = app.seed_history_session("session-b", "second prompt")
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+
+            shown = app.command("shortcut", shortcut="cmd_shift_backslash")
+            self.assertTrue(shown["historyWindowVisible"])
+            loaded = app.wait_for(lambda state: len(state["historySessionIDs"]) == 2, timeout=8.0)
+            self.assertIn("session-a", loaded["historySessionIDs"])
+            self.assertIn("session-b", loaded["historySessionIDs"])
+
+            deleted = app.command("delete_history_session", text="session-a")
+            self.assertFalse(first.exists())
+            final_state = app.wait_for(lambda state: "session-a" not in state["historySessionIDs"], timeout=8.0)
+            self.assertIn("session-b", final_state["historySessionIDs"])
+            self.assertNotIn("session-a", final_state["historySessionIDs"])
 
     def test_setup_gate_blocks_panel_until_history_is_configured(self) -> None:
         with QuickAskHarness(initial_setup_complete=False, force_setup_gate=True) as app:
