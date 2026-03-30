@@ -679,7 +679,7 @@ final class QuickAskViewModel: ObservableObject {
             ModelOption(id: "codex::gpt-5.4-mini", provider: "codex", model: "gpt-5.4-mini", label: "ChatGPT 5.4 Mini", short_label: "ChatGPT 5.4 Mini", hint: "Codex CLI login", endpoint: "codex://login", default: false),
             ModelOption(id: "gemini::gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash", short_label: "Gemini 3 Flash", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
             ModelOption(id: "gemini::gemini-2.5-flash-lite", provider: "gemini", model: "gemini-2.5-flash-lite", label: "Gemini Flash Lite", short_label: "Gemini Flash Lite", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
-            ModelOption(id: "ollama::qwen2.5:14b", provider: "ollama", model: "qwen2.5:14b", label: "Qwen 2.5 14B", short_label: "Qwen 2.5 14B", hint: "Local model", endpoint: "ollama://local", default: false),
+            ModelOption(id: "ollama::qwen2.5:14b", provider: "ollama", model: "qwen2.5:14b", label: "Qwen 2.5 14B", short_label: "Qwen 2.5 14B", hint: "Ollama model", endpoint: "ollama://local", default: false),
         ]
     }
 
@@ -1682,7 +1682,7 @@ struct QuickAskSettingsView: View {
                                     Text(model.shortLabel)
                                         .font(.system(size: 12, weight: .medium))
                                         .foregroundStyle(QuickAskTheme.strongText)
-                                    Text(model.provider == "ollama" ? "Local model" : "\(model.provider.capitalized) via CLI login")
+                                    Text(model.provider == "ollama" ? "Ollama model" : "\(model.provider.capitalized) via CLI login")
                                         .font(.system(size: 10, weight: .regular))
                                         .foregroundStyle(QuickAskTheme.mutedText)
                                 }

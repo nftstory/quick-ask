@@ -72,7 +72,7 @@ That script:
 5. Type a prompt and press `Enter`.
 6. Use the model menu to switch providers or open `Settings…`.
    You can also open `History` directly from that menu.
-7. Press `Cmd+Shift+\` to browse and restore prior chats when history is enabled.
+7. Press `Cmd+Shift+\` to browse prior chats when history is enabled.
 8. Press `Cmd+,` to toggle the real Quick Ask settings window.
 9. Use the `Keyboard Shortcuts` button in settings for a compact shortcut reference.
 
