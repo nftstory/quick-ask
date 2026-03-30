@@ -9,6 +9,7 @@ BIN_DIR="${APP_DIR}/Contents/MacOS"
 RES_DIR="${APP_DIR}/Contents/Resources"
 PLIST_PATH="${APP_DIR}/Contents/Info.plist"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/${BUNDLE_ID}.plist"
+SKIP_LAUNCH_AGENT="${QUICK_ASK_SKIP_LAUNCH_AGENT:-0}"
 LEGACY_AGENT_LABELS=(
   "com.nicholas.quickask"
   "com.nicholas.quick-ask"
@@ -94,7 +95,11 @@ for agent_path in "${LEGACY_AGENT_PATHS[@]}"; do
 done
 
 launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
-launchctl kickstart -k "gui/$(id -u)/${BUNDLE_ID}"
+if [[ "$SKIP_LAUNCH_AGENT" != "1" ]]; then
+  launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
+  launchctl kickstart -k "gui/$(id -u)/${BUNDLE_ID}"
+else
+  echo "Skipped LaunchAgent bootstrap because QUICK_ASK_SKIP_LAUNCH_AGENT=1"
+fi
 
 echo "Installed ${APP_NAME} at ${APP_DIR}"

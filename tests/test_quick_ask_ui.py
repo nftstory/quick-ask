@@ -43,6 +43,10 @@ class QuickAskHarness:
         initial_setup_complete: bool = True,
         seed_archive_dir: bool | None = None,
         force_setup_gate: bool = False,
+        app_binary: Path | None = None,
+        launch_agents: list[Path] | None = None,
+        seed_defaults_enabled: bool = True,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-ui-")
         base = Path(self.temp_dir.name)
@@ -55,8 +59,12 @@ class QuickAskHarness:
         self.initial_setup_complete = initial_setup_complete
         self.seed_archive_dir = initial_setup_complete if seed_archive_dir is None else seed_archive_dir
         self.force_setup_gate = force_setup_gate
+        self.app_binary = app_binary or APP_BINARY
+        self.launch_agents = launch_agents if launch_agents is not None else LAUNCH_AGENTS
+        self.seed_defaults_enabled = seed_defaults_enabled
+        self.extra_env = extra_env or {}
         self.defaults_suite = f"app.quickask.tests.{uuid.uuid4().hex}"
-        self.stopped_agents = [path for path in LAUNCH_AGENTS if path.exists() and self._launch_agent_is_loaded(path)]
+        self.stopped_agents = [path for path in self.launch_agents if path.exists() and self._launch_agent_is_loaded(path)]
 
     def __enter__(self) -> "QuickAskHarness":
         self.stop_background_launch()
@@ -66,12 +74,14 @@ class QuickAskHarness:
         env["QUICK_ASK_UI_TEST_STATE_PATH"] = str(self.state_path)
         env["QUICK_ASK_UI_TEST_COMMAND_PATH"] = str(self.command_path)
         env["QUICK_ASK_USER_DEFAULTS_SUITE"] = self.defaults_suite
+        env.update(self.extra_env)
         if self.enable_singleton:
             env["QUICK_ASK_UI_TEST_ENABLE_SINGLETON"] = "1"
         if self.force_setup_gate:
             env["QUICK_ASK_UI_TEST_FORCE_SETUP_GATE"] = "1"
-        self.seed_defaults()
-        self.process = subprocess.Popen([str(APP_BINARY)], env=env)
+        if self.seed_defaults_enabled:
+            self.seed_defaults()
+        self.process = subprocess.Popen([str(self.app_binary)], env=env)
         self.wait_for(lambda state: state["handledCommandID"] == 0)
         return self
 
@@ -98,7 +108,7 @@ class QuickAskHarness:
             run_command(["launchctl", "bootstrap", f"gui/{uid}", str(plist)])
 
     def kill_existing_app(self) -> None:
-        run_command(["pkill", "-f", str(APP_BINARY)])
+        run_command(["pkill", "-f", str(self.app_binary)])
         time.sleep(0.4)
 
     def _launch_agent_is_loaded(self, plist: Path) -> bool:
@@ -188,7 +198,7 @@ class QuickAskHarness:
         env.pop("QUICK_ASK_UI_TEST_COMMAND_PATH", None)
         env.pop("QUICK_ASK_UI_TEST_ENABLE_SINGLETON", None)
         return subprocess.run(
-            [str(APP_BINARY)],
+            [str(self.app_binary)],
             env=env,
             check=False,
             stdout=subprocess.DEVNULL,

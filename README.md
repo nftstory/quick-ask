@@ -100,3 +100,16 @@ python3 tests/test_quick_ask_ui.py -v
 ```
 
 The UI tests do not send real chat prompts to Claude, Codex, Gemini, or Ollama. They run the app in a test mode with stubbed generation so layout, queueing, setup gating, history, and shortcut behavior can be verified without burning inference tokens.
+
+Additional smoke tests:
+
+```zsh
+python3 tests/test_backend_env.py -v
+python3 tests/test_fresh_install.py -v
+```
+
+If you want to verify a clean install path without loading the LaunchAgent, you can build with:
+
+```zsh
+QUICK_ASK_SKIP_LAUNCH_AGENT=1 ./build-quick-ask
+```
