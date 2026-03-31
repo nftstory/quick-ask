@@ -3387,8 +3387,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         let hostingView = context.hostingView
         hostingView.layoutSubtreeIfNeeded()
         let fitting = hostingView.fittingSize
-        let targetWidth: CGFloat = 560
-        let targetHeight = round(max(44, min(fitting.height, 560)))
+        let automaticWidth: CGFloat = 560
+        let automaticHeight = round(max(44, min(fitting.height, 560)))
         let testOriginX: CGFloat = 700
         let testBottomY: CGFloat = 120
 
@@ -3396,32 +3396,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         context.isProgrammaticMove = true
         if !panel.isVisible {
             if uiTestMode {
-                frame = NSRect(x: testOriginX, y: testBottomY, width: targetWidth, height: targetHeight)
+                frame = NSRect(x: testOriginX, y: testBottomY, width: automaticWidth, height: automaticHeight)
             } else if context.isPrimary,
                       let savedOriginX = defaults.object(forKey: panelOriginXKey) as? Double,
                       let savedBottomY = defaults.object(forKey: panelBottomYKey) as? Double {
                 frame = NSRect(
                     x: round(savedOriginX),
                     y: round(savedBottomY),
-                    width: targetWidth,
-                    height: targetHeight
+                    width: automaticWidth,
+                    height: automaticHeight
                 )
             } else if frame.equalTo(.zero) || frame.width == 0 || frame.height == 0 {
-                frame = initialFrame(width: targetWidth, height: targetHeight)
+                frame = initialFrame(width: automaticWidth, height: automaticHeight)
             }
             let anchoredBottomY = round(frame.minY)
             frame.origin.y = anchoredBottomY
-            frame.size.width = targetWidth
-            frame.size.height = targetHeight
+            frame.size.width = automaticWidth
+            frame.size.height = automaticHeight
             context.panelBottomY = anchoredBottomY
+            context.userResizedSize = nil
         } else {
             let anchoredBottomY = uiTestMode ? testBottomY : round(context.panelBottomY ?? panel.frame.minY)
+            let targetSize = uiTestMode
+                ? NSSize(width: automaticWidth, height: automaticHeight)
+                : (context.userResizedSize ?? NSSize(width: automaticWidth, height: automaticHeight))
             if uiTestMode && context.isPrimary {
                 frame.origin.x = testOriginX
             }
             frame.origin.y = anchoredBottomY
-            frame.size.height = targetHeight
-            frame.size.width = targetWidth
+            frame.size.height = targetSize.height
+            frame.size.width = targetSize.width
             context.panelBottomY = anchoredBottomY
         }
         panel.setFrame(frame, display: true)
@@ -3498,7 +3502,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 
         let panel = QuickAskPanel(
             contentRect: initialFrame ?? NSRect(x: 0, y: 0, width: 560, height: 70),
-            styleMask: [.borderless, .fullSizeContentView],
+            styleMask: [.borderless, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -3510,6 +3514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
+        panel.minSize = NSSize(width: 420, height: 70)
         panel.contentView = hostingView
         panel.orderOut(nil)
         panel.onNewChat = { [weak self] in
@@ -3535,6 +3540,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             self,
             selector: #selector(handleChatPanelDidBecomeKey(_:)),
             name: NSWindow.didBecomeKeyNotification,
+            object: panel
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleChatPanelDidResize(_:)),
+            name: NSWindow.didResizeNotification,
             object: panel
         )
 
@@ -3601,6 +3612,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     private func hidePanel(_ context: ChatPanelContext) {
         QuickAskLog.shared.write("hidePanel id=\(context.id.uuidString)")
         context.viewModel.panelHidden()
+        context.userResizedSize = nil
         context.panel.orderOut(nil)
         uiTestHarness?.writeState()
     }
@@ -4011,6 +4023,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     }
 
     @objc
+    private func handleChatPanelDidResize(_ notification: Notification) {
+        guard let context = chatPanelContext(for: notification.object as? NSWindow) else { return }
+        guard !context.isProgrammaticMove else { return }
+        guard context.panel.isVisible else { return }
+        context.userResizedSize = context.panel.frame.size
+        context.panelBottomY = context.panel.frame.minY
+        if context.isPrimary {
+            defaults.set(context.panel.frame.minX, forKey: panelOriginXKey)
+            defaults.set(context.panel.frame.minY, forKey: panelBottomYKey)
+        }
+        uiTestHarness?.writeState()
+    }
+
+    @objc
     private func handleHistoryWindowDidMove(_ notification: Notification) {
         historyWindow?.saveFrame(usingName: "QuickAskHistoryWindowFrame")
         uiTestHarness?.writeState()
@@ -4214,6 +4240,7 @@ final class ChatPanelContext {
     let panel: QuickAskPanel
     let layoutProxy: ChatPanelLayoutProxy
     var panelBottomY: CGFloat?
+    var userResizedSize: NSSize?
     var isProgrammaticMove = false
 
     init(
