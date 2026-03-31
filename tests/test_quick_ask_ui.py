@@ -21,6 +21,8 @@ if str(ROOT) not in sys.path:
 
 import quick_ask_shared as shared
 
+os.environ.setdefault("QUICK_ASK_TEST_MASTER_KEY_B64", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+
 APP_BINARY = Path(os.environ.get("QUICK_ASK_APP_BINARY", Path.home() / "Applications/Quick Ask.app/Contents/MacOS/Quick Ask"))
 LAUNCH_AGENTS = [
     Path.home() / "Library/LaunchAgents/app.quickask.mac.plist",
@@ -74,6 +76,7 @@ class QuickAskHarness:
         env["QUICK_ASK_UI_TEST_STATE_PATH"] = str(self.state_path)
         env["QUICK_ASK_UI_TEST_COMMAND_PATH"] = str(self.command_path)
         env["QUICK_ASK_USER_DEFAULTS_SUITE"] = self.defaults_suite
+        env["QUICK_ASK_TEST_MASTER_KEY_B64"] = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
         env.update(self.extra_env)
         if self.enable_singleton:
             env["QUICK_ASK_UI_TEST_ENABLE_SINGLETON"] = "1"
@@ -477,6 +480,32 @@ class QuickAskUITests(unittest.TestCase):
             self.assertNotEqual(after_request["frontmostAppName"], "Quick Ask")
             self.assertEqual(after_request["focusRequestCount"], baseline_focus_requests + 1)
 
+    def test_visible_panel_does_not_reset_after_idle_timeout(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="first prompt")
+            app.command("submit")
+            app.command("complete_generation", text="reply")
+
+            after_timeout = app.command("force_idle_timeout_elapsed")
+            self.assertTrue(after_timeout["panelVisible"])
+            self.assertEqual(after_timeout["messageCount"], 2)
+
+    def test_hidden_panel_resets_after_idle_timeout(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="first prompt")
+            app.command("submit")
+            app.command("complete_generation", text="reply")
+
+            hidden = app.command("hide_panel")
+            self.assertFalse(hidden["panelVisible"])
+
+            after_timeout = app.command("force_idle_timeout_elapsed")
+            self.assertFalse(after_timeout["panelVisible"])
+            self.assertEqual(after_timeout["messageCount"], 0)
+            self.assertEqual(after_timeout["inputText"], "")
+
     def test_duplicate_launch_does_not_open_panel(self) -> None:
         with QuickAskHarness(enable_singleton=True) as app:
             initial = app.read_state()
@@ -538,6 +567,43 @@ class QuickAskUITests(unittest.TestCase):
                 timeout=8.0,
             )
             self.assertNotIn("codex::gpt-5.4", disabled["visibleModelIDs"])
+
+    def test_cmd_brackets_cycle_models_from_focused_input(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.wait_for(lambda current: len(current["visibleModelIDs"]) >= 2, timeout=8.0)
+
+            app.command("select_model", text="claude::claude-opus-4-6")
+            next_model = app.command("shortcut", shortcut="cmd_right_bracket")
+            self.assertEqual(next_model["selectedModel"], "Sonnet 4.6")
+
+            previous_model = app.command("shortcut", shortcut="cmd_left_bracket")
+            self.assertEqual(previous_model["selectedModel"], "Opus 4.6")
+
+            wrapped = app.command("shortcut", shortcut="cmd_left_bracket")
+            self.assertEqual(wrapped["selectedModel"], "Qwen 2.5 14B")
+
+    def test_ctrl_tab_cycles_provider_groups_from_focused_input(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.wait_for(lambda current: len(current["visibleModelIDs"]) >= 4, timeout=8.0)
+
+            app.command("select_model", text="claude::claude-opus-4-6")
+
+            chatgpt = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(chatgpt["selectedModel"], "ChatGPT 5.4")
+
+            gemini = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(gemini["selectedModel"], "Gemini 3 Flash")
+
+            ollama = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(ollama["selectedModel"], "Qwen 2.5 14B")
+
+            wrapped = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(wrapped["selectedModel"], "Opus 4.6")
+
+            previous = app.command("shortcut", shortcut="ctrl_shift_tab")
+            self.assertEqual(previous["selectedModel"], "Qwen 2.5 14B")
 
     def test_switching_models_preserves_history_and_updates_next_turn_selection(self) -> None:
         with QuickAskHarness() as app:

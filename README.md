@@ -14,6 +14,8 @@ The app lives above your other windows, keeps the input bar pinned while the con
 - Open a keyboard shortcuts reference from `Settings…`
 - Start a fresh chat with `Cmd+N`
 - Dismiss the focused Quick Ask window with `Cmd+W`
+- Cycle visible models with `Cmd+[ / Cmd+]`
+- Cycle model providers with `Ctrl+Tab / Ctrl+Shift+Tab`
 - Queue prompts while a reply is still streaming
 - Steer to the next queued prompt with `Cmd+Enter`
 - Cancel queued prompts without interrupting the current reply
@@ -83,6 +85,8 @@ Model switching semantics:
 - changing the selected model does not interrupt the reply already in flight
 - the next submitted turn uses the newly selected model
 - the current conversation history carries forward until you start a fresh chat
+- the conversation does not auto-clear while the panel is visible
+- if the panel stays dismissed for 45 seconds, Quick Ask clears the conversation automatically
 
 ## Repo Notes
 

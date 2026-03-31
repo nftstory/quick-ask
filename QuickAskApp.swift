@@ -541,8 +541,9 @@ final class QuickAskViewModel: ObservableObject {
     private let lastModelKey = "QuickAskSelectedModelID"
     private let idleTimeout: TimeInterval = 45
     private let uiTestMode = ProcessInfo.processInfo.environment["QUICK_ASK_UI_TEST_MODE"] == "1"
-    private var idleTimer: Timer?
     private var lastInteractionAt = Date()
+    private var panelDismissedAt: Date?
+    private var pendingDismissResetWorkItem: DispatchWorkItem?
     private var activeProcess: Process?
     private var stdoutBuffer = Data()
     private var stderrBuffer = Data()
@@ -574,11 +575,10 @@ final class QuickAskViewModel: ObservableObject {
         if let storedModel = defaults.string(forKey: lastModelKey), !storedModel.isEmpty {
             selectedModelID = storedModel
         }
-        startIdleTimer()
     }
 
     deinit {
-        idleTimer?.invalidate()
+        pendingDismissResetWorkItem?.cancel()
     }
 
     func requestFocus() {
@@ -593,12 +593,17 @@ final class QuickAskViewModel: ObservableObject {
 
     func panelShown() {
         touch()
+        panelDismissedAt = nil
+        pendingDismissResetWorkItem?.cancel()
+        pendingDismissResetWorkItem = nil
         QuickAskLog.shared.write("panel shown")
         requestFocus()
     }
 
     func panelHidden() {
         touch()
+        panelDismissedAt = Date()
+        scheduleDismissedReset()
         QuickAskLog.shared.write("panel hidden")
         saveTranscript()
     }
@@ -713,6 +718,29 @@ final class QuickAskViewModel: ObservableObject {
         selectedModelID = modelID
         defaults.set(modelID, forKey: lastModelKey)
         touch()
+    }
+
+    func cycleModel(by offset: Int) {
+        guard !models.isEmpty else { return }
+        let currentIndex = models.firstIndex(where: { $0.id == selectedModelID }) ?? 0
+        let nextIndex = (currentIndex + offset).positiveModulo(models.count)
+        selectModel(models[nextIndex].id)
+    }
+
+    func cycleProvider(by offset: Int) {
+        guard !models.isEmpty else { return }
+        let providers = models.reduce(into: [String]()) { orderedProviders, model in
+            guard !orderedProviders.contains(model.provider) else { return }
+            orderedProviders.append(model.provider)
+        }
+        guard !providers.isEmpty else { return }
+
+        let currentProvider = models.first(where: { $0.id == selectedModelID })?.provider ?? providers[0]
+        let currentIndex = providers.firstIndex(of: currentProvider) ?? 0
+        let nextProvider = providers[(currentIndex + offset).positiveModulo(providers.count)]
+        if let nextModel = models.first(where: { $0.provider == nextProvider }) {
+            selectModel(nextModel.id)
+        }
     }
 
     func clearHistory(preserveInput: Bool = false, preserveStatus: Bool = false) {
@@ -1234,20 +1262,46 @@ final class QuickAskViewModel: ObservableObject {
         return formatter.string(from: date)
     }
 
-    private func startIdleTimer() {
-        idleTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+    private func scheduleDismissedReset() {
+        pendingDismissResetWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                guard !self.isGenerating else { return }
-                let idleFor = Date().timeIntervalSince(self.lastInteractionAt)
-                if idleFor >= self.idleTimeout, !self.messages.isEmpty || !self.inputText.isEmpty {
+                guard self.panelDismissedAt != nil else { return }
+                guard !self.isGenerating else {
+                    self.scheduleDismissedReset()
+                    return
+                }
+                if !self.messages.isEmpty || !self.inputText.isEmpty {
                     self.clearHistory()
                 }
             }
         }
-        if let idleTimer {
-            RunLoop.main.add(idleTimer, forMode: .common)
+        pendingDismissResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleTimeout, execute: workItem)
+    }
+
+    func forceIdleTimeoutElapsedForTesting(panelIsVisible: Bool) {
+        if panelIsVisible {
+            panelDismissedAt = nil
+            pendingDismissResetWorkItem?.cancel()
+            pendingDismissResetWorkItem = nil
+        } else {
+            panelDismissedAt = Date().addingTimeInterval(-(idleTimeout + 1))
+            pendingDismissResetWorkItem?.cancel()
+            pendingDismissResetWorkItem = nil
+            if !messages.isEmpty || !inputText.isEmpty {
+                clearHistory()
+            }
         }
+    }
+}
+
+private extension Int {
+    func positiveModulo(_ modulus: Int) -> Int {
+        guard modulus > 0 else { return 0 }
+        let remainder = self % modulus
+        return remainder >= 0 ? remainder : remainder + modulus
     }
 }
 
@@ -1812,6 +1866,8 @@ private let quickAskKeyboardShortcuts: [KeyboardShortcutItem] = [
     KeyboardShortcutItem(keys: "Cmd+N", description: "Start a fresh chat"),
     KeyboardShortcutItem(keys: "Enter", description: "Send the current prompt"),
     KeyboardShortcutItem(keys: "Cmd+Enter", description: "Steer the current draft ahead of the queue"),
+    KeyboardShortcutItem(keys: "Cmd+[ / Cmd+]", description: "Switch to the previous or next visible model"),
+    KeyboardShortcutItem(keys: "Ctrl+Tab / Ctrl+Shift+Tab", description: "Switch to the next or previous model provider"),
 ]
 
 struct QuickAskKeyboardShortcutsView: View {
@@ -2979,6 +3035,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 self.viewModel.steerCurrentInput()
                 return nil
             }
+            if self.panel.isVisible,
+               self.panel.isKeyWindow,
+               self.panelInputIsFocused(),
+               flags == [.control, .shift],
+               event.keyCode == UInt16(kVK_Tab) {
+                self.viewModel.cycleProvider(by: -1)
+                return nil
+            }
+            if self.panel.isVisible,
+               self.panel.isKeyWindow,
+               self.panelInputIsFocused(),
+               flags == [.control],
+               event.keyCode == UInt16(kVK_Tab) {
+                self.viewModel.cycleProvider(by: 1)
+                return nil
+            }
+            if self.panel.isVisible,
+               self.panel.isKeyWindow,
+               self.panelInputIsFocused(),
+               flags == [.command],
+               event.keyCode == UInt16(kVK_ANSI_LeftBracket) {
+                self.viewModel.cycleModel(by: -1)
+                return nil
+            }
+            if self.panel.isVisible,
+               self.panel.isKeyWindow,
+               self.panelInputIsFocused(),
+               flags == [.command],
+               event.keyCode == UInt16(kVK_ANSI_RightBracket) {
+                self.viewModel.cycleModel(by: 1)
+                return nil
+            }
             if flags == [.command],
                event.charactersIgnoringModifiers == "," {
                 self.toggleSettingsWindow()
@@ -3010,12 +3098,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         let fitting = hostingView.fittingSize
         let targetWidth: CGFloat = 560
         let targetHeight = round(max(44, min(fitting.height, 560)))
+        let testOriginX: CGFloat = 700
+        let testBottomY: CGFloat = 120
 
         var frame = panel.frame
         isProgrammaticPanelMove = true
         if !panel.isVisible {
             if uiTestMode {
-                frame = NSRect(x: 700, y: 90, width: targetWidth, height: targetHeight)
+                frame = NSRect(x: testOriginX, y: testBottomY, width: targetWidth, height: targetHeight)
             } else if let savedOriginX = defaults.object(forKey: panelOriginXKey) as? Double,
                let savedBottomY = defaults.object(forKey: panelBottomYKey) as? Double {
                 frame = NSRect(
@@ -3033,7 +3123,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             frame.size.height = targetHeight
             panelBottomY = anchoredBottomY
         } else {
-            let anchoredBottomY = round(panelBottomY ?? panel.frame.minY)
+            let anchoredBottomY = uiTestMode ? testBottomY : round(panelBottomY ?? panel.frame.minY)
+            if uiTestMode {
+                frame.origin.x = testOriginX
+            }
             frame.origin.y = anchoredBottomY
             frame.size.height = targetHeight
             frame.size.width = targetWidth
@@ -3228,6 +3321,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         viewModel.panelShown()
         settleVisiblePanel()
         uiTestHarness?.writeState()
+    }
+
+    private func panelInputIsFocused() -> Bool {
+        guard panel.isVisible, panel.isKeyWindow else { return false }
+        if let editor = panel.firstResponder as? NSTextView, editor.isFieldEditor {
+            return true
+        }
+        return false
     }
 
     private func toggleHistoryWindow() {
@@ -3563,12 +3664,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             viewModel.retryLastFailedTurn()
         case "request_focus":
             viewModel.requestFocus()
+        case "force_idle_timeout_elapsed":
+            viewModel.forceIdleTimeoutElapsedForTesting(panelIsVisible: panel.isVisible)
         case "shortcut":
             switch command.shortcut {
             case "cmd_n":
                 startNewChat()
             case "cmd_enter":
                 viewModel.steerCurrentInput()
+            case "ctrl_tab":
+                viewModel.cycleProvider(by: 1)
+            case "ctrl_shift_tab":
+                viewModel.cycleProvider(by: -1)
+            case "cmd_left_bracket":
+                viewModel.cycleModel(by: -1)
+            case "cmd_right_bracket":
+                viewModel.cycleModel(by: 1)
             case "cmd_comma":
                 toggleSettingsWindow()
             case "cmd_w":

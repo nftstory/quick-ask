@@ -47,6 +47,13 @@ def b64d(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii"))
 
 
+def test_master_key_override() -> bytes | None:
+    encoded = os.environ.get("QUICK_ASK_TEST_MASTER_KEY_B64", "").strip()
+    if not encoded:
+        return None
+    return b64d(encoded)
+
+
 def llm_state_dir() -> pathlib.Path:
     return pathlib.Path(os.environ.get("XDG_STATE_HOME", pathlib.Path.home() / ".local/state")) / "llm"
 
@@ -359,6 +366,10 @@ def user_keychain_candidates() -> list[pathlib.Path]:
 
 
 def find_master_key() -> bytes | None:
+    overridden = test_master_key_override()
+    if overridden is not None:
+        return overridden
+
     account = getpass.getuser()
     keychains = user_keychain_candidates()
 
@@ -395,6 +406,9 @@ def find_master_key() -> bytes | None:
 def store_master_key(master_key: bytes) -> None:
     if len(master_key) != 32:
         raise RuntimeError("Transcript key must be exactly 32 bytes.")
+
+    if test_master_key_override() is not None:
+        return
 
     account = getpass.getuser()
     key_b64 = b64e(master_key)
