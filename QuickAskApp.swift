@@ -3213,7 +3213,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         historyWindow.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.79, blue: 0.77, alpha: 1)
         historyWindow.level = .floating
         historyWindow.hasShadow = true
-        historyWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        historyWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         historyWindow.hidesOnDeactivate = false
         historyWindow.isMovableByWindowBackground = false
         historyWindow.contentView = historyHostingView
@@ -3241,7 +3241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         settingsWindow.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.79, blue: 0.77, alpha: 1)
         settingsWindow.level = .floating
         settingsWindow.hasShadow = true
-        settingsWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        settingsWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         settingsWindow.hidesOnDeactivate = false
         settingsWindow.contentView = settingsHostingView
         settingsWindow.setFrameAutosaveName("QuickAskSettingsWindowFrame")
@@ -3262,7 +3262,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         shortcutsWindow.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.79, blue: 0.77, alpha: 1)
         shortcutsWindow.level = .floating
         shortcutsWindow.hasShadow = true
-        shortcutsWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        shortcutsWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         shortcutsWindow.hidesOnDeactivate = false
         shortcutsWindow.contentView = shortcutsHostingView
         shortcutsWindow.orderOut(nil)
@@ -3507,7 +3507,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         panel.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.79, blue: 0.77, alpha: 1)
         panel.level = .floating
         panel.hasShadow = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = true
         panel.contentView = hostingView
