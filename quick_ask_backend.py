@@ -34,6 +34,10 @@ QUICK_SYSTEM_PROMPT = (
     "Do not use preambles, bullet spam, or stage directions unless requested."
 )
 SAFE_CWD = pathlib.Path.home() / ".local/state/quick-ask/claude-scratch"
+CODEX_APP_SERVER_STATE_DIR = pathlib.Path.home() / ".local/state/quick-ask"
+CODEX_APP_SERVER_STATUS_PATH = CODEX_APP_SERVER_STATE_DIR / "codex-app-server-status.json"
+DEFAULT_CODEX_APP_SERVER_CWD = pathlib.Path.home() / "Downloads"
+DEFAULT_GEMINI_CWD = pathlib.Path.home() / "Downloads"
 BLOCKED_PROVIDER_ENV_KEYS = {
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -72,6 +76,17 @@ CLAUDE_MODELS: list[dict[str, Any]] = [
 
 CODEX_MODELS: list[dict[str, Any]] = [
     {
+        "id": "codex::gpt-5.3-app-server",
+        "provider": "codex",
+        "model": "gpt-5.3-codex",
+        "label": "Codex 5.3",
+        "short_label": "Codex 5.3",
+        "hint": "Codex app server",
+        "default": False,
+        "effort": "medium",
+        "runtime": "app_server",
+    },
+    {
         "id": "codex::gpt-5.4-instant",
         "provider": "codex",
         "model": "gpt-5.4",
@@ -80,6 +95,7 @@ CODEX_MODELS: list[dict[str, Any]] = [
         "hint": None,
         "default": False,
         "effort": "low",
+        "runtime": "cli",
     },
     {
         "id": "codex::gpt-5.4-medium",
@@ -90,6 +106,7 @@ CODEX_MODELS: list[dict[str, Any]] = [
         "hint": None,
         "default": False,
         "effort": "medium",
+        "runtime": "cli",
     },
 ]
 
@@ -832,6 +849,398 @@ def stream_claude(model: str, history: list[HistoryMessage]) -> int:
     return 0
 
 
+def codex_app_server_runtime(model_id: str) -> str:
+    option = codex_model_option(model_id)
+    runtime = str(option.get("runtime") or "").strip() if option else ""
+    return runtime or "cli"
+
+
+def latest_user_turn(history: list[HistoryMessage]) -> HistoryMessage | None:
+    for message in reversed(history):
+        if str(message.get("role") or "").strip().lower() == "user":
+            return message
+    return None
+
+
+def write_codex_app_server_status(payload: dict[str, Any]) -> None:
+    CODEX_APP_SERVER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    CODEX_APP_SERVER_STATUS_PATH.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+
+
+def clear_codex_app_server_status() -> None:
+    with contextlib.suppress(FileNotFoundError):
+        CODEX_APP_SERVER_STATUS_PATH.unlink()
+
+
+def codex_jsonrpc_request(request_id: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": method,
+        "params": params,
+    }
+
+
+def codex_send_jsonrpc(stdin: Any, payload: dict[str, Any]) -> None:
+    stdin.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    stdin.flush()
+
+
+def codex_app_server_start(
+    model: str,
+    session_id: str,
+    cwd: pathlib.Path,
+) -> subprocess.Popen[str]:
+    codex_path = command_path("codex")
+    if not codex_path:
+        raise RuntimeError("Codex CLI is not installed.")
+
+    process = subprocess.Popen(
+        [codex_path, "app-server", "--listen", "stdio://"],
+        cwd=str(cwd),
+        env=provider_runtime_env("codex"),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    write_codex_app_server_status(
+        {
+            "pid": process.pid,
+            "model": model,
+            "session_id": session_id,
+            "cwd": str(cwd),
+            "status": "starting",
+        }
+    )
+    return process
+
+
+def codex_extract_turn_error(notification: dict[str, Any]) -> str | None:
+    params = notification.get("params")
+    if not isinstance(params, dict):
+        return None
+    turn = params.get("turn")
+    if not isinstance(turn, dict):
+        return None
+    error = turn.get("error")
+    if not isinstance(error, dict):
+        return None
+    message = str(error.get("message") or "").strip()
+    return message or None
+
+
+def codex_thread_id_from_result(response: dict[str, Any]) -> str | None:
+    result = response.get("result")
+    if not isinstance(result, dict):
+        return None
+    thread = result.get("thread")
+    if not isinstance(thread, dict):
+        return None
+    thread_id = str(thread.get("id") or "").strip()
+    return thread_id or None
+
+
+def codex_try_resume_thread(
+    stdin: Any,
+    request_id: int,
+    thread_id: str,
+) -> int:
+    codex_send_jsonrpc(
+        stdin,
+        codex_jsonrpc_request(
+            request_id,
+            "thread/resume",
+            {
+                "threadId": thread_id,
+            },
+        ),
+    )
+    return request_id + 1
+
+
+def codex_start_thread(
+    stdin: Any,
+    request_id: int,
+    model: str,
+    cwd: pathlib.Path,
+) -> int:
+    codex_send_jsonrpc(
+        stdin,
+        codex_jsonrpc_request(
+            request_id,
+            "thread/start",
+            {
+                "approvalPolicy": "never",
+                "sandbox": "danger-full-access",
+                "cwd": str(cwd),
+                "model": model,
+            },
+        ),
+    )
+    return request_id + 1
+
+
+def codex_start_turn(
+    stdin: Any,
+    request_id: int,
+    thread_id: str,
+    model: str,
+    user_input: list[dict[str, str]],
+    cwd: pathlib.Path,
+    effort: str | None,
+) -> int:
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": user_input,
+        "model": model,
+        "cwd": str(cwd),
+        "approvalPolicy": "never",
+        # Force full access even on resumed threads that may carry older sandbox settings.
+        "sandboxPolicy": {"type": "dangerFullAccess"},
+    }
+    if effort:
+        params["effort"] = effort
+    codex_send_jsonrpc(
+        stdin,
+        codex_jsonrpc_request(
+            request_id,
+            "turn/start",
+            params,
+        ),
+    )
+    return request_id + 1
+
+
+def codex_build_turn_input(
+    history: list[HistoryMessage],
+    attachment_dir: pathlib.Path | None = None,
+) -> list[dict[str, str]]:
+    latest_user = latest_user_turn(history)
+    if latest_user is None:
+        return [{"type": "text", "text": "Continue."}]
+
+    content = str(latest_user.get("content") or "").strip()
+    payload: list[dict[str, str]] = []
+    if content:
+        payload.append({"type": "text", "text": content})
+
+    if attachment_dir is not None:
+        groups = materialize_attachment_file_groups([latest_user], attachment_dir)
+        for group in groups:
+            for path in group:
+                payload.append({"type": "localImage", "path": str(path)})
+
+    if payload:
+        return payload
+
+    # Fallback for attachment-only turns when files could not be materialized.
+    return [{"type": "text", "text": "The user sent an image. Please analyze it."}]
+
+
+def stream_codex_app_server(model_id: str, history: list[HistoryMessage], context: dict[str, Any]) -> int:
+    option = codex_model_option(model_id)
+    if option is None:
+        emit({"type": "error", "message": f"Unknown Codex model: {model_id}"})
+        return 1
+
+    model = str(option.get("model") or "").strip() or "gpt-5.3-codex"
+    effort = str(option.get("effort") or "").strip() or None
+    session_id = str(context.get("session_id") or "").strip()
+    requested_thread_id = str(context.get("codex_thread_id") or "").strip()
+
+    cwd = DEFAULT_CODEX_APP_SERVER_CWD
+    if not cwd.exists():
+        cwd = pathlib.Path.home()
+
+    temp_dir: tempfile.TemporaryDirectory[str] | None = None
+    proc: subprocess.Popen[str] | None = None
+    try:
+        attachment_dir = None
+        if history_contains_attachments(history):
+            temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-codex-app-server-images-", dir=SAFE_CWD)
+            attachment_dir = pathlib.Path(temp_dir.name)
+
+        proc = codex_app_server_start(model, session_id=session_id, cwd=cwd)
+        if proc.stdin is None or proc.stdout is None:
+            raise RuntimeError("Codex app server could not start stdio transport.")
+
+        request_id = 1
+        pending: dict[int, str] = {}
+        thread_id = requested_thread_id or ""
+        current_turn_id = ""
+        streamed_any = False
+        saw_turn_terminal = False
+        emitted_error = False
+        initialized = False
+        started_turn = False
+
+        pending[request_id] = "initialize"
+        codex_send_jsonrpc(
+            proc.stdin,
+            codex_jsonrpc_request(
+                request_id,
+                "initialize",
+                {
+                    "clientInfo": {
+                        "name": "quick-ask",
+                        "version": "1.0",
+                    },
+                    "capabilities": {},
+                },
+            ),
+        )
+        request_id += 1
+
+        if thread_id:
+            pending[request_id] = "thread/resume"
+            request_id = codex_try_resume_thread(proc.stdin, request_id, thread_id)
+        else:
+            pending[request_id] = "thread/start"
+            request_id = codex_start_thread(proc.stdin, request_id, model, cwd)
+
+        while True:
+            raw_line = proc.stdout.readline()
+            if not raw_line:
+                break
+            line = raw_line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if "id" in payload:
+                response_id = payload.get("id")
+                if not isinstance(response_id, int):
+                    continue
+                response_kind = pending.pop(response_id, "")
+                if payload.get("error"):
+                    if response_kind == "thread/resume":
+                        thread_id = ""
+                        pending[request_id] = "thread/start"
+                        request_id = codex_start_thread(proc.stdin, request_id, model, cwd)
+                        continue
+                    message = str((payload.get("error") or {}).get("message") or "Codex app server request failed.").strip()
+                    emit({"type": "error", "message": message})
+                    emitted_error = True
+                    break
+
+                if response_kind == "initialize":
+                    initialized = True
+                    continue
+                if response_kind in {"thread/start", "thread/resume"}:
+                    maybe_thread_id = codex_thread_id_from_result(payload)
+                    if maybe_thread_id:
+                        thread_id = maybe_thread_id
+                        emit({"type": "meta", "codex_thread_id": thread_id, "codex_pid": proc.pid})
+                        write_codex_app_server_status(
+                            {
+                                "pid": proc.pid,
+                                "model": model,
+                                "session_id": session_id,
+                                "thread_id": thread_id,
+                                "cwd": str(cwd),
+                                "status": "running",
+                            }
+                        )
+                    if initialized and thread_id and not started_turn:
+                        pending[request_id] = "turn/start"
+                        request_id = codex_start_turn(
+                            proc.stdin,
+                            request_id,
+                            thread_id,
+                            model,
+                            codex_build_turn_input(history, attachment_dir=attachment_dir),
+                            cwd,
+                            effort,
+                        )
+                        started_turn = True
+                    continue
+                if response_kind == "turn/start":
+                    result = payload.get("result")
+                    if isinstance(result, dict):
+                        turn = result.get("turn")
+                        if isinstance(turn, dict):
+                            current_turn_id = str(turn.get("id") or "").strip()
+                    continue
+                continue
+
+            method = str(payload.get("method") or "").strip()
+            params = payload.get("params")
+            if not isinstance(params, dict):
+                continue
+
+            if method == "item/agentMessage/delta":
+                delta = str(params.get("delta") or "")
+                if delta:
+                    emit({"type": "chunk", "text": delta})
+                    streamed_any = True
+                continue
+
+            if method == "error":
+                details = params.get("error")
+                if isinstance(details, dict):
+                    message = str(details.get("message") or "").strip()
+                else:
+                    message = str(params.get("message") or "").strip()
+                if message:
+                    emit({"type": "error", "message": message})
+                    emitted_error = True
+                continue
+
+            if method == "turn/completed":
+                completed_turn = params.get("turn")
+                if isinstance(completed_turn, dict):
+                    status = str(completed_turn.get("status") or "").strip()
+                    if status == "failed":
+                        if not emitted_error:
+                            message = codex_extract_turn_error(payload) or "Codex app server turn failed."
+                            emit({"type": "error", "message": message})
+                            emitted_error = True
+                    else:
+                        emit({"type": "done"})
+                else:
+                    emit({"type": "done"})
+                saw_turn_terminal = True
+                break
+
+        if not saw_turn_terminal and not emitted_error:
+            if proc.poll() is not None and proc.returncode not in {None, 0}:
+                stderr = proc.stderr.read().strip() if proc.stderr is not None else ""
+                emit({"type": "error", "message": stderr or f"Codex app server exited with status {proc.returncode}."})
+                return int(proc.returncode or 1)
+            if not streamed_any:
+                emit({"type": "error", "message": "Codex app server did not return a reply."})
+                return 1
+            emit({"type": "done"})
+            return 0
+
+        return 1 if emitted_error else 0
+    except KeyboardInterrupt:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+        raise
+    except Exception as exc:
+        emit({"type": "error", "message": str(exc)})
+        return 1
+    finally:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=2.0)
+            if proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+        clear_codex_app_server_status()
+        if temp_dir is not None:
+            temp_dir.cleanup()
+
+
 def codex_model_option(model_id: str) -> dict[str, Any] | None:
     return next((option for option in CODEX_MODELS if str(option.get("id")) == model_id), None)
 
@@ -888,7 +1297,10 @@ def codex_shell_invocation(
     return argv, SAFE_CWD
 
 
-def stream_codex(model_id: str, history: list[HistoryMessage]) -> int:
+def stream_codex(model_id: str, history: list[HistoryMessage], context: dict[str, Any]) -> int:
+    if codex_app_server_runtime(model_id) == "app_server":
+        return stream_codex_app_server(model_id, history, context)
+
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     proc: subprocess.Popen[str] | None = None
     SAFE_CWD.mkdir(parents=True, exist_ok=True)
@@ -962,6 +1374,10 @@ def gemini_shell_invocation(
     history: list[HistoryMessage],
     attachment_dir: pathlib.Path | None = None,
 ) -> tuple[list[str], pathlib.Path]:
+    gemini_cwd = DEFAULT_GEMINI_CWD
+    if not gemini_cwd.exists():
+        gemini_cwd = pathlib.Path.home()
+
     attachment_reference_groups: list[list[str]] | None = None
     if attachment_dir is not None and history_contains_attachments(history):
         attachment_reference_groups = []
@@ -969,9 +1385,9 @@ def gemini_shell_invocation(
             references: list[str] = []
             for path in group:
                 try:
-                    relative = path.relative_to(SAFE_CWD)
+                    relative = path.relative_to(gemini_cwd)
                 except ValueError:
-                    relative = path
+                    relative = path.resolve()
                 references.append(f"@{relative}")
             attachment_reference_groups.append(references)
     prompt = build_gemini_prompt(history, attachment_reference_groups=attachment_reference_groups)
@@ -986,11 +1402,13 @@ def gemini_shell_invocation(
         "--output-format",
         "stream-json",
         "--approval-mode",
-        "plan",
+        "yolo",
+        "--include-directories",
+        str(pathlib.Path.home()),
     ]
     if model:
         argv.extend(["--model", model])
-    return argv, SAFE_CWD
+    return argv, gemini_cwd
 
 
 def stream_gemini(model: str, history: list[HistoryMessage]) -> int:
@@ -1160,12 +1578,22 @@ def stream_ollama(model: str, history: list[HistoryMessage]) -> int:
         return 1
 
 
-def read_history_from_stdin() -> list[HistoryMessage]:
+def read_chat_request_from_stdin() -> tuple[list[HistoryMessage], dict[str, Any]]:
     raw = sys.stdin.read().strip()
     if not raw:
-        return []
+        return [], {}
     payload = json.loads(raw)
-    history = payload.get("history", payload)
+    context: dict[str, Any] = {}
+    if isinstance(payload, dict):
+        history = payload.get("history", payload)
+        session_id = str(payload.get("session_id") or "").strip()
+        if session_id:
+            context["session_id"] = session_id
+        codex_thread_id = str(payload.get("codex_thread_id") or "").strip()
+        if codex_thread_id:
+            context["codex_thread_id"] = codex_thread_id
+    else:
+        history = payload
     if not isinstance(history, list):
         raise RuntimeError("Expected a history array on stdin.")
     cleaned: list[HistoryMessage] = []
@@ -1181,7 +1609,12 @@ def read_history_from_stdin() -> list[HistoryMessage]:
         if attachments:
             payload["attachments"] = attachments
         cleaned.append(payload)
-    return cleaned
+    return cleaned, context
+
+
+def read_history_from_stdin() -> list[HistoryMessage]:
+    history, _context = read_chat_request_from_stdin()
+    return history
 
 
 def handle_models() -> int:
@@ -1268,7 +1701,7 @@ def handle_delete(session_id: str) -> int:
 
 
 def handle_chat(model_id: str) -> int:
-    history = read_history_from_stdin()
+    history, context = read_chat_request_from_stdin()
     if "::" not in model_id:
         emit({"type": "error", "message": f"Malformed model id: {model_id}"})
         return 1
@@ -1277,7 +1710,7 @@ def handle_chat(model_id: str) -> int:
     if provider == "claude":
         return stream_claude(model, history)
     if provider == "codex":
-        return stream_codex(model_id, history)
+        return stream_codex(model_id, history, context)
     if provider == "gemini":
         return stream_gemini(model, history)
     if provider == "ollama":
@@ -1316,6 +1749,13 @@ def transcript_endpoint(model_id: str) -> dict[str, str]:
             "base_url": "claude://login",
         }
     if provider == "codex":
+        option = codex_model_option(model_id)
+        if option and str(option.get("runtime") or "") == "app_server":
+            return {
+                "kind": "remote",
+                "label": "codex-app-server",
+                "base_url": "codex://app-server",
+            }
         return {
             "kind": "remote",
             "label": "codex-cli-login",
@@ -1343,7 +1783,7 @@ def handle_save(session_id: str, created_at: str, model_id: str) -> int:
     if history_disabled():
         emit({"type": "saved", "path": ""})
         return 0
-    history = read_history_from_stdin()
+    history, context = read_chat_request_from_stdin()
     messages = [{"role": "system", "content": QUICK_SYSTEM_PROMPT}, *history]
     payload = {
         "session_id": session_id,
@@ -1355,6 +1795,9 @@ def handle_save(session_id: str, created_at: str, model_id: str) -> int:
         "source": "quick-ask",
         "messages": messages,
     }
+    codex_thread_id = str(context.get("codex_thread_id") or "").strip()
+    if codex_thread_id and model_id.startswith("codex::"):
+        payload["codex_thread_id"] = codex_thread_id
     store = shared.SessionStore(shared.default_save_dir(), session_id=session_id)
     store.save(payload)
     emit({"type": "saved", "path": str(store.path)})

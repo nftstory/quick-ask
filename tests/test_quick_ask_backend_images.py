@@ -165,7 +165,7 @@ class BackendImageSupportTests(unittest.TestCase):
                 "attachments": [sample_attachment()],
             }
         ]
-        with mock.patch.object(backend, "read_history_from_stdin", return_value=history):
+        with mock.patch.object(backend, "read_chat_request_from_stdin", return_value=(history, {})):
             with mock.patch.object(backend, "stream_claude", return_value=0) as stream_claude:
                 result = backend.handle_chat("claude::claude-opus-4-6")
 
@@ -180,7 +180,7 @@ class BackendImageSupportTests(unittest.TestCase):
                 "attachments": [sample_attachment()],
             }
         ]
-        with mock.patch.object(backend, "read_history_from_stdin", return_value=history):
+        with mock.patch.object(backend, "read_chat_request_from_stdin", return_value=(history, {})):
             with mock.patch.object(backend, "stream_gemini", return_value=0) as stream_gemini:
                 result = backend.handle_chat("gemini::gemini-3-flash-preview")
 

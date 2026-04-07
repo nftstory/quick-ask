@@ -45,6 +45,7 @@ struct ChatMessage: Identifiable, Equatable {
     enum Role: String {
         case user
         case assistant
+        case event
     }
 
     let id: UUID
@@ -218,6 +219,7 @@ struct QuickAskLoadedSession: Codable {
     let savedAt: String
     let model: String
     let modelID: String
+    let codexThreadID: String?
     let messages: [QuickAskTranscriptMessage]
 
     enum CodingKeys: String, CodingKey {
@@ -226,6 +228,7 @@ struct QuickAskLoadedSession: Codable {
         case savedAt = "saved_at"
         case model
         case modelID = "model_id"
+        case codexThreadID = "codex_thread_id"
         case messages
     }
 }
@@ -580,6 +583,8 @@ private struct QuickAskUITestState: Codable {
     let historyAreaHeight: Double
     let historySessionIDs: [String]
     let messageCount: Int
+    let copiedMessageID: String?
+    let copyIndicatorVisible: Bool
     let queuedCount: Int
     let queuedPromptContents: [String]
     let isGenerating: Bool
@@ -622,6 +627,7 @@ final class QuickAskViewModel: ObservableObject {
     }
 
     @Published var messages: [ChatMessage] = []
+    @Published var copiedMessageID: UUID?
     @Published var queuedPrompts: [QueuedPrompt] = []
     @Published var inputText = ""
     @Published var pendingAttachments: [ChatAttachment] = []
@@ -655,9 +661,11 @@ final class QuickAskViewModel: ObservableObject {
     private var activeAssistantMessageID: UUID?
     private var sessionID = UUID().uuidString
     private var sessionCreatedAt = QuickAskViewModel.timestampString(for: Date())
+    private var codexThreadID: String?
     private let saveQueue = DispatchQueue(label: "app.quickask.save", qos: .utility)
     private var pendingResetAfterTermination = false
     private var pendingResetPreserveInput = false
+    private var copyResetWorkItem: DispatchWorkItem?
     private var pendingSteerPromptID: UUID?
     private var currentTurnStreamedAny = false
     private var activeTurnInput: ChatTurnInput?
@@ -684,6 +692,7 @@ final class QuickAskViewModel: ObservableObject {
 
     deinit {
         pendingDismissResetWorkItem?.cancel()
+        copyResetWorkItem?.cancel()
     }
 
     func requestFocus() {
@@ -827,6 +836,7 @@ final class QuickAskViewModel: ObservableObject {
         [
             ModelOption(id: "claude::claude-opus-4-6", provider: "claude", model: "claude-opus-4-6", label: "Claude Opus 4.6", short_label: "Opus 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: true),
             ModelOption(id: "claude::claude-sonnet-4-6", provider: "claude", model: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", short_label: "Sonnet 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: false),
+            ModelOption(id: "codex::gpt-5.3-app-server", provider: "codex", model: "gpt-5.3-codex", label: "Codex 5.3", short_label: "Codex 5.3", hint: "Codex app server", endpoint: "codex://app-server", default: false),
             ModelOption(id: "codex::gpt-5.4-instant", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4 Instant", short_label: "ChatGPT 5.4 Instant", hint: "Codex CLI login", endpoint: "codex://login", default: false),
             ModelOption(id: "codex::gpt-5.4-medium", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4 Medium", short_label: "ChatGPT 5.4 Medium", hint: "Codex CLI login", endpoint: "codex://login", default: false),
             ModelOption(id: "gemini::gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash", short_label: "Gemini 3 Flash", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
@@ -836,6 +846,21 @@ final class QuickAskViewModel: ObservableObject {
     }
 
     func selectModel(_ modelID: String) {
+        guard modelID != selectedModelID else {
+            touch()
+            return
+        }
+        let previousLabel = models.first(where: { $0.id == selectedModelID })?.shortLabel
+        let nextLabel = models.first(where: { $0.id == modelID })?.shortLabel
+        if let previousLabel, let nextLabel, !messages.isEmpty {
+            messages.append(
+                ChatMessage(
+                    role: .event,
+                    content: "Changed model: \(previousLabel) -> \(nextLabel)"
+                )
+            )
+            layoutDelegate?.quickAskNeedsLayout()
+        }
         selectedModelID = modelID
         defaults.set(modelID, forKey: lastModelKey)
         touch()
@@ -867,6 +892,9 @@ final class QuickAskViewModel: ObservableObject {
     func clearHistory(preserveInput: Bool = false, preserveStatus: Bool = false) {
         saveTranscript()
         messages = []
+        copiedMessageID = nil
+        copyResetWorkItem?.cancel()
+        copyResetWorkItem = nil
         queuedPrompts = []
         historyAreaHeight = 0
         manualExtraHistoryHeight = 0
@@ -879,14 +907,35 @@ final class QuickAskViewModel: ObservableObject {
             statusText = ""
         }
         activeAssistantMessageID = nil
+        codexThreadID = nil
         resetSessionIfNeeded()
         layoutDelegate?.quickAskNeedsLayout()
+    }
+
+    func copyMessage(_ message: ChatMessage) {
+        let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(message.content, forType: .string)
+
+        copyResetWorkItem?.cancel()
+        copiedMessageID = message.id
+        QuickAskLog.shared.write("message copied id=\(message.id.uuidString)")
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.copiedMessageID == message.id else { return }
+            self.copiedMessageID = nil
+        }
+        copyResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: workItem)
     }
 
     func restoreSession(_ session: QuickAskLoadedSession) {
         saveTranscript()
         sessionID = session.sessionID
         sessionCreatedAt = session.createdAt
+        codexThreadID = session.codexThreadID
         statusText = ""
         inputText = ""
         pendingAttachments = []
@@ -900,12 +949,12 @@ final class QuickAskViewModel: ObservableObject {
 
         let restoredMessages = session.messages.compactMap { message -> ChatMessage? in
             let role = message.role.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard role == "user" || role == "assistant" else { return nil }
+            guard role == "user" || role == "assistant" || role == "event" else { return nil }
             let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
             let attachments = message.attachments ?? []
             guard !content.isEmpty || !attachments.isEmpty else { return nil }
             return ChatMessage(
-                role: role == "user" ? .user : .assistant,
+                role: role == "user" ? .user : (role == "assistant" ? .assistant : .event),
                 content: content,
                 attachments: attachments
             )
@@ -1108,6 +1157,9 @@ final class QuickAskViewModel: ObservableObject {
 
         let historyPayload = messages
             .filter { message in
+                if message.role != .user && message.role != .assistant {
+                    return false
+                }
                 if message.role == .assistant && message.id == assistantID && message.content.isEmpty {
                     return false
                 }
@@ -1153,7 +1205,14 @@ final class QuickAskViewModel: ObservableObject {
 
         do {
             try process.run()
-            if let data = try? JSONSerialization.data(withJSONObject: ["history": historyPayload]) {
+            var chatPayload: [String: Any] = [
+                "history": historyPayload,
+                "session_id": sessionID,
+            ]
+            if let codexThreadID, !codexThreadID.isEmpty {
+                chatPayload["codex_thread_id"] = codexThreadID
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: chatPayload) {
                 stdin.fileHandleForWriting.write(data)
             }
             try? stdin.fileHandleForWriting.close()
@@ -1231,6 +1290,11 @@ final class QuickAskViewModel: ObservableObject {
         case "chunk":
             let text = payload["text"] as? String ?? ""
             appendAssistantChunk(text)
+        case "meta":
+            if let threadID = payload["codex_thread_id"] as? String, !threadID.isEmpty {
+                codexThreadID = threadID
+                QuickAskLog.shared.write("codex thread attached id=\(threadID)")
+            }
         case "done":
             break
         case "error":
@@ -1341,6 +1405,11 @@ final class QuickAskViewModel: ObservableObject {
         if lowercased.contains("not logged in") || lowercased.contains("auth login") {
             return "\(modelLabel) is not available from this Mac right now. Open Settings and finish the CLI login for that provider."
         }
+        if lowercased.contains("is not supported when using codex with a chatgpt account")
+            || lowercased.contains("invalid_request_error")
+            || (lowercased.contains("codex app server") && lowercased.contains("failed")) {
+            return "\(modelLabel) is unavailable for this Codex account in app-server mode. Switch models or retry after account changes."
+        }
         if lowercased.contains("network is unreachable")
             || lowercased.contains("could not resolve host")
             || lowercased.contains("name or service not known")
@@ -1406,6 +1475,7 @@ final class QuickAskViewModel: ObservableObject {
         let sessionID = self.sessionID
         let sessionCreatedAt = self.sessionCreatedAt
         let modelID = self.selectedModelID
+        let codexThreadID = self.codexThreadID
         let processEnvironment = self.processEnvironmentProvider()
 
         saveQueue.async {
@@ -1431,7 +1501,11 @@ final class QuickAskViewModel: ObservableObject {
 
             do {
                 try process.run()
-                if let data = try? JSONSerialization.data(withJSONObject: ["history": history]) {
+                var savePayload: [String: Any] = ["history": history]
+                if let codexThreadID, !codexThreadID.isEmpty {
+                    savePayload["codex_thread_id"] = codexThreadID
+                }
+                if let data = try? JSONSerialization.data(withJSONObject: savePayload) {
                     stdin.fileHandleForWriting.write(data)
                 }
                 try? stdin.fileHandleForWriting.close()
@@ -1747,6 +1821,7 @@ struct QuickAskHistoryRow: View {
 struct QuickAskHistoryView: View {
     @ObservedObject var viewModel: QuickAskHistoryViewModel
     let onSelectSession: (QuickAskHistorySession) -> Void
+    @State private var pendingDeleteSession: QuickAskHistorySession?
 
     private func commandButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
@@ -1808,7 +1883,7 @@ struct QuickAskHistoryView: View {
                                         onSelectSession(session)
                                     },
                                     onDelete: {
-                                        viewModel.deleteSession(session.sessionID)
+                                        pendingDeleteSession = session
                                     }
                                 )
                             }
@@ -1826,6 +1901,28 @@ struct QuickAskHistoryView: View {
             } else {
                 viewModel.ensureValidSelection()
             }
+        }
+        .alert(
+            "Delete conversation?",
+            isPresented: Binding(
+                get: { pendingDeleteSession != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        pendingDeleteSession = nil
+                    }
+                }
+            ),
+            presenting: pendingDeleteSession
+        ) { session in
+            Button("Delete", role: .destructive) {
+                viewModel.deleteSession(session.sessionID)
+                pendingDeleteSession = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeleteSession = nil
+            }
+        } message: { session in
+            Text("This will permanently remove \"\(session.preview.isEmpty ? "Untitled session" : session.preview)\" from history.")
         }
     }
 }
@@ -2339,8 +2436,9 @@ final class HotKeyManager {
 
 struct MessageBubble: View {
     let message: ChatMessage
+    let isCopied: Bool
+    let onCopy: () -> Void
     @State private var isHovering = false
-    @State private var justCopied = false
 
     private var bubbleColor: Color {
         switch message.role {
@@ -2348,6 +2446,8 @@ struct MessageBubble: View {
             return Color.white.opacity(0.26)
         case .assistant:
             return Color.white.opacity(0.14)
+        case .event:
+            return .clear
         }
     }
 
@@ -2356,90 +2456,87 @@ struct MessageBubble: View {
     }
 
     private var canCopy: Bool {
-        !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard message.role != .event else { return false }
+        return !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var copyButtonForeground: Color {
-        justCopied ? Color.white : QuickAskTheme.strongText.opacity(0.78)
+        isCopied ? Color.white : QuickAskTheme.strongText.opacity(0.78)
     }
 
     private var copyButtonBackground: Color {
-        justCopied ? QuickAskTheme.successAccent : Color.white.opacity(0.18)
+        isCopied ? QuickAskTheme.successAccent : Color.white.opacity(0.18)
     }
 
     private var copyButtonBorder: Color {
-        justCopied ? QuickAskTheme.successAccent.opacity(0.96) : QuickAskTheme.dividerColor
-    }
-
-    private func copyMessage() {
-        guard canCopy else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(message.content, forType: .string)
-        withAnimation(.easeOut(duration: 0.18)) {
-            justCopied = true
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            withAnimation(.easeIn(duration: 0.18)) {
-                justCopied = false
-            }
-        }
+        isCopied ? QuickAskTheme.successAccent.opacity(0.96) : QuickAskTheme.dividerColor
     }
 
     var body: some View {
-        HStack {
-            if message.role == .user { Spacer(minLength: 40) }
-            VStack(alignment: .leading, spacing: 8) {
-                if !message.attachments.isEmpty {
-                    AttachmentStripView(attachments: message.attachments)
+        Group {
+            if message.role == .event {
+                HStack(spacing: 8) {
+                    Rectangle()
+                        .fill(QuickAskTheme.dividerColor)
+                        .frame(height: 1)
+                    Text(message.content)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(QuickAskTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Rectangle()
+                        .fill(QuickAskTheme.dividerColor)
+                        .frame(height: 1)
                 }
-                if !message.content.isEmpty || message.attachments.isEmpty {
-                    MessageContentView(text: message.content.isEmpty ? "…" : message.content)
-                        .foregroundStyle(textColor)
-                }
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .padding(.trailing, canCopy ? 72 : 10)
-            .frame(maxWidth: 360, alignment: .leading)
-            .background(
-                Rectangle()
-                    .fill(bubbleColor)
-            )
-            .overlay(
-                Rectangle()
-                    .stroke(Color.black.opacity(0.18), lineWidth: 1)
-            )
-            .overlay(alignment: .topTrailing) {
-                if canCopy {
-                    Button(action: copyMessage) {
-                        HStack(spacing: 4) {
-                            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
-                                .font(.system(size: 10, weight: .semibold))
-                            if justCopied {
-                                Text("Copied")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .transition(.opacity.combined(with: .move(edge: .trailing)))
-                            }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+            } else {
+                HStack {
+                    if message.role == .user { Spacer(minLength: 40) }
+                    VStack(alignment: .leading, spacing: 8) {
+                        if !message.attachments.isEmpty {
+                            AttachmentStripView(attachments: message.attachments)
                         }
-                        .foregroundStyle(copyButtonForeground)
-                        .padding(.horizontal, justCopied ? 7 : 0)
-                        .frame(minWidth: justCopied ? 58 : 18, minHeight: 18)
-                        .background(Rectangle().fill(copyButtonBackground))
-                        .overlay(Rectangle().stroke(copyButtonBorder, lineWidth: 1))
-                        .shadow(color: QuickAskTheme.successAccent.opacity(justCopied ? 0.22 : 0), radius: 5, y: 1)
-                        .scaleEffect(justCopied ? 1.08 : 1.0)
+                        if !message.content.isEmpty || message.attachments.isEmpty {
+                            MessageContentView(text: message.content.isEmpty ? "…" : message.content)
+                                .foregroundStyle(textColor)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .opacity(isHovering || justCopied ? 1 : 0)
-                    .animation(.spring(response: 0.22, dampingFraction: 0.62), value: justCopied)
-                    .padding(5)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .padding(.trailing, canCopy ? 24 : 10)
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .background(
+                        Rectangle()
+                            .fill(bubbleColor)
+                    )
+                    .overlay(
+                        Rectangle()
+                            .stroke(Color.black.opacity(0.18), lineWidth: 1)
+                    )
+                    .overlay(alignment: .topTrailing) {
+                        if canCopy {
+                            Button(action: onCopy) {
+                                Image(systemName: isCopied ? "checkmark.circle.fill" : "doc.on.doc")
+                                    .font(.system(size: isCopied ? 13 : 11, weight: .bold))
+                                .foregroundStyle(copyButtonForeground)
+                                .frame(width: 22, height: 22)
+                                .background(Rectangle().fill(copyButtonBackground))
+                                .overlay(Rectangle().stroke(copyButtonBorder, lineWidth: 1))
+                                .shadow(color: QuickAskTheme.successAccent.opacity(isCopied ? 0.36 : 0), radius: 7, y: 1)
+                                .scaleEffect(isCopied ? 1.18 : 1.0)
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(isHovering || isCopied ? 1 : 0)
+                            .animation(.spring(response: 0.22, dampingFraction: 0.62), value: isCopied)
+                            .padding(5)
+                        }
+                    }
+                    .onHover { hovering in
+                        isHovering = hovering
+                    }
+                    if message.role == .assistant { Spacer(minLength: 40) }
                 }
             }
-            .onHover { hovering in
-                isHovering = hovering
-            }
-            if message.role == .assistant { Spacer(minLength: 40) }
         }
         .frame(maxWidth: .infinity)
     }
@@ -3079,7 +3176,15 @@ struct QuickAskView: View {
                     ScrollView(.vertical, showsIndicators: visibleHistoryHeight >= 450) {
                         VStack(spacing: 8) {
                             ForEach(viewModel.messages) { message in
-                                MessageBubble(message: message)
+                                MessageBubble(
+                                    message: message,
+                                    isCopied: viewModel.copiedMessageID == message.id,
+                                    onCopy: {
+                                        withAnimation(.easeOut(duration: 0.18)) {
+                                            viewModel.copyMessage(message)
+                                        }
+                                    }
+                                )
                                     .id(message.id)
                             }
                             Color.clear
@@ -4483,6 +4588,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             historyAreaHeight: Double(viewModel?.historyAreaHeight ?? 0),
             historySessionIDs: historyViewModel?.sessions.map(\.sessionID) ?? [],
             messageCount: viewModel?.messages.count ?? 0,
+            copiedMessageID: viewModel?.copiedMessageID?.uuidString,
+            copyIndicatorVisible: viewModel?.copiedMessageID != nil,
             queuedCount: viewModel?.queuedPrompts.count ?? 0,
             queuedPromptContents: viewModel?.queuedPrompts.map(\.content) ?? [],
             isGenerating: viewModel?.isGenerating ?? false,
@@ -4581,6 +4688,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         case "delete_history_session":
             if let text = command.text, !text.isEmpty {
                 historyViewModel.deleteSession(text)
+            }
+        case "copy_last_message":
+            if let message = activeContext.viewModel.messages.last(where: {
+                !$0.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) {
+                activeContext.viewModel.copyMessage(message)
             }
         case "clear_queue":
             activeContext.viewModel.clearQueuedPrompts()

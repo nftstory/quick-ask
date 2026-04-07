@@ -506,6 +506,21 @@ class QuickAskUITests(unittest.TestCase):
             self.assertEqual(after_timeout["messageCount"], 0)
             self.assertEqual(after_timeout["inputText"], "")
 
+    def test_copy_last_message_shows_and_clears_success_indicator(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="hello")
+            app.command("submit")
+            app.command("complete_generation", text="reply")
+
+            copied = app.command("copy_last_message")
+            self.assertTrue(copied["copyIndicatorVisible"])
+            self.assertIsNotNone(copied.get("copiedMessageID"))
+
+            cleared = app.wait_for(lambda state: state["copyIndicatorVisible"] is False, timeout=4.0)
+            self.assertFalse(cleared["copyIndicatorVisible"])
+            self.assertIsNone(cleared.get("copiedMessageID"))
+
     def test_panel_resize_is_available_only_after_conversation_starts_and_resets_on_reopen(self) -> None:
         with QuickAskHarness() as app:
             shown = app.command("show_panel")
